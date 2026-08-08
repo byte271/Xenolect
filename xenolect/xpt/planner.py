@@ -138,9 +138,7 @@ def annotate_arguments(
     syn: Syndrome, tools: list[ToolDef], expected: dict[str, dict[str, Any]]
 ) -> None:
     schema_by_name = {t.name: t.parameters for t in tools}
-    if syn.accepted_parser is None:
-        return
-    for call in syn.parser_outcomes[syn.accepted_parser].calls:
+    for call in syn.accepted_calls:
         schema = schema_by_name.get(call.name)
         if schema is not None:
             ok, _ = validate_tool_arguments(call.arguments, schema)

@@ -51,6 +51,7 @@ class RealCompileReport:
                 "driver_grammar_size": driver_grammar_size(),
                 "online_frontier_size": driver_grammar_size(),
                 "parameterized_protocol_ir": True,
+                "bounded_response_parser_synthesis": True,
                 "arbitrary_state_machine_synthesis": False,
             },
             "xpt": self.xpt.as_dict(),

@@ -171,6 +171,7 @@ def install_target(
             "driver_grammar_size": driver_grammar_size(),
             "online_frontier_size": driver_grammar_size(),
             "parameterized_protocol_ir": True,
+            "bounded_response_parser_synthesis": True,
             "arbitrary_state_machine_synthesis": False,
         },
         model_fingerprint=target.model_fingerprint,

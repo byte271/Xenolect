@@ -18,6 +18,7 @@ from xenolect.abi.events import AssistantText, AssistantToolCall, Event, ToolCal
 from xenolect.driver.ir import (
     Driver,
     FramedJsonToolCallsParser,
+    JsonObjectToolCallsParser,
     NativeToolCallsParser,
     ToolCallFields,
     effective_protocol,
@@ -61,6 +62,15 @@ def parse_model_response_full(raw: dict[str, Any], driver: Driver) -> ParseResul
             continue
         if isinstance(primitive, FramedJsonToolCallsParser):
             parsed, matched, surrounding = _parse_framed_primitive(message, primitive)
+            if parsed.errors:
+                errors.extend(parsed.errors)
+            elif matched:
+                matches.append((_calls_from_events(parsed.events), surrounding))
+            continue
+        if isinstance(primitive, JsonObjectToolCallsParser):
+            parsed, matched, surrounding = _parse_json_objects_primitive(
+                message, primitive
+            )
             if parsed.errors:
                 errors.extend(parsed.errors)
             elif matched:
@@ -171,6 +181,32 @@ def extract_balanced_json(text: str, start: int) -> tuple[str | None, int, str |
                     return text[start : i + 1], i + 1, None
         i += 1
     return None, start, "unbalanced JSON object"
+
+
+def iter_json_objects(text: str) -> list[tuple[int, int, Any]]:
+    """Return non-overlapping strict top-level JSON objects found in text.
+
+    Nested objects stay part of their enclosing object.  Each balanced region
+    is visited once; malformed enclosing objects are skipped as a unit and an
+    unbalanced tail stops the scan.  This keeps scanning linear and fail-closed.
+    """
+    found: list[tuple[int, int, Any]] = []
+    cursor = 0
+    while cursor < len(text):
+        start = text.find("{", cursor)
+        if start < 0:
+            break
+        blob, end, error = extract_balanced_json(text, start)
+        if error or blob is None:
+            break
+        try:
+            value = strict_json_loads(blob)
+        except json.JSONDecodeError:
+            cursor = end
+            continue
+        found.append((start, end, value))
+        cursor = end
+    return found
 
 
 def _extract_message(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -448,6 +484,76 @@ def _parse_framed_primitive(
 
     if not calls:
         return ParseResult(raw_message=message), False, None
+
+    surrounding: str | None = None
+    if primitive.capture_surrounding_text:
+        pieces: list[str] = []
+        cursor = 0
+        for start, end in consumed:
+            pieces.append(content[cursor:start])
+            cursor = end
+        pieces.append(content[cursor:])
+        retained = "".join(pieces).strip()
+        surrounding = retained or None
+    return (
+        ParseResult(events=_events_for_calls(calls, content=surrounding), raw_message=message),
+        True,
+        surrounding,
+    )
+
+
+def _parse_json_objects_primitive(
+    message: dict[str, Any],
+    primitive: JsonObjectToolCallsParser,
+) -> tuple[ParseResult, bool, str | None]:
+    """Return calls from matching embedded JSON objects and preserve other text."""
+    content = message.get("content") or ""
+    if not isinstance(content, str):
+        content = json.dumps(content)
+
+    calls: list[ToolCall] = []
+    consumed: list[tuple[int, int]] = []
+    fields = primitive.fields
+    for start, end, obj in iter_json_objects(content):
+        if not isinstance(obj, dict):
+            continue
+        has_name = fields.name in obj
+        has_arguments = fields.arguments in obj
+        if not has_name and not has_arguments:
+            continue
+        if not (has_name and has_arguments):
+            return (
+                ParseResult(
+                    errors=[
+                        "embedded JSON object partially matched configured tool-call fields"
+                    ],
+                    raw_message=message,
+                ),
+                True,
+                None,
+            )
+        call, error = _parse_object_to_call(
+            obj,
+            context="embedded JSON tool call",
+            fields=fields,
+        )
+        if error:
+            return ParseResult(errors=[error], raw_message=message), True, None
+        assert call is not None
+        calls.append(call)
+        consumed.append((start, end))
+
+    if not calls:
+        return ParseResult(raw_message=message), False, None
+    if len(calls) > 1 and not primitive.multiple:
+        return (
+            ParseResult(
+                errors=["response primitive permits only one embedded JSON tool call"],
+                raw_message=message,
+            ),
+            True,
+            None,
+        )
 
     surrounding: str | None = None
     if primitive.capture_surrounding_text:

@@ -44,11 +44,13 @@ That is **144 representable Driver programs** in v0.1.0.
 
 Xenolect uses black-box probing and a stateful certification trajectory to infer and verify one of those programs. It does not brute-force all 144 against the real model, but it also does not claim to generate arbitrary new state-machine logic outside this grammar. If the model needs behavior the grammar cannot express, setup fails rather than pretending compatibility.
 
-The current main branch adds the first incremental Driver IR v0.2 foundation without widening the expensive online search budget. XPT still begins with the proven 144-program request frontier, then composes the observed request presentation, response parser, tool-result renderer, schema transforms, and required batch-state actions into a parameterized protocol program. The runtime now executes those primitives rather than branching directly on three format names.
+Driver IR v0.2 adds an incremental composable foundation without widening the expensive online search budget. XPT still begins with the proven request configurations from the legacy 144-program frontier, then composes the observed request presentation, response parser, tool-result renderer, schema transforms, and required batch-state actions into a parameterized protocol program. The runtime executes those primitives rather than branching directly on three format names.
 
 The parameterized primitives can represent native calls, strict whole-content JSON calls, custom tagged or XML-style JSON frames, custom object field names, multiple agreeing response parsers, segmented tool-result messages, and assistant text carried beside tool calls. Existing v0.1 `.mdriver` files retain their previous JSON shape and content hash.
 
-This is a foundation, not a claim that black-box XPT can already discover every possible frame or state machine. The online candidate frontier remains bounded, arbitrary state transitions remain unsupported, and every emitted Driver still has to pass the existing fresh certification trajectory within the same 300-second default deadline. Unknown primitives, ambiguous parser results, malformed frames, and incomplete state programs fail explicitly.
+XPT can now make one specific synthesis step beyond that fixed grammar: when the legacy response parsers produce no calls, it deterministically inspects the already-paid response for strict whole-content or embedded JSON tool objects, infers custom field names and adjacent literal delimiters, and validates the resulting response primitive across the remaining trajectory. Extraction is bounded; ambiguous field mappings, call IDs, or parser results fail closed. A Driver is still emitted only after the independent fresh-instance certification path passes.
+
+This is not a claim of arbitrary protocol synthesis. Request and tool-result exploration remain bounded, arbitrary state transitions remain unsupported, and every compile stays inside the same 12-generation and 300-second defaults with three generations reserved for certification.
 
 The diagnostic tools used during `xenolect install` are temporary conformance probes. They are not the tools your app later uses. At runtime, Xenolect transforms the real tools supplied by your app according to the installed Driver.
 
@@ -229,7 +231,7 @@ Buffered streaming means Xenolect first receives the complete upstream completio
 
 The following are **not** claimed by v0.1.0:
 
-- arbitrary state-machine Driver synthesis outside the 144-program v0.1.0 grammar
+- arbitrary request, tool-result, or state-machine Driver synthesis; the v0.2 milestone currently adds bounded response-parser synthesis only
 - creation of application tools or tool implementations
 - `/v1/responses`
 - embeddings

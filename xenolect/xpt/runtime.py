@@ -21,14 +21,19 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from xenolect.abi.events import AssistantText, AssistantToolCall, ToolCall, ToolCallBatch
 from xenolect.driver.ir import (
     Driver,
+    NativeToolCallsParser,
     ParserKind,
+    ProtocolProgram,
+    ResponsePrimitive,
     SchemaTransform,
     ToolEncoding,
     ToolResultEncoding,
     composed_driver,
 )
+from xenolect.driver.parse import parse_model_response_full
 from xenolect.driver.termination import Termination
 from xenolect.xpt.certify import certify
 from xenolect.xpt.frontier import (
@@ -55,6 +60,7 @@ from xenolect.xpt.planner import (
     probe_payload,
     probe_succeeded,
 )
+from xenolect.xpt.response_discovery import discover_response_parser
 from xenolect.xpt.session import (
     Branch,
     Budget,
@@ -66,7 +72,7 @@ from xenolect.xpt.session import (
     Ledger,
     XptSession,
 )
-from xenolect.xpt.syndrome import ParseConsensus, Syndrome
+from xenolect.xpt.syndrome import ParseConsensus, Syndrome, apply_discovered_response
 
 CERTIFIED = "CERTIFIED"
 UNSUPPORTED = "UNSUPPORTED"
@@ -136,6 +142,52 @@ def _driver_from(
     )
 
 
+def _driver_from_discovered(
+    config: RequestConfig,
+    parser: ResponsePrimitive,
+    result_encoding: ToolResultEncoding,
+) -> Driver:
+    """Keep the proven request/result program and replace only response parsing."""
+    base = _driver_from(config, ParserKind.NATIVE, result_encoding)
+    assert base.protocol is not None
+    protocol = ProtocolProgram(
+        request=list(base.protocol.request),
+        response=[NativeToolCallsParser(), parser],
+        tool_result=base.protocol.tool_result,
+        state=list(base.protocol.state),
+    )
+    return Driver(
+        ir_version="0.2",
+        schema_transforms=list(base.schema_transforms),
+        protocol=protocol,
+    )
+
+
+def _observe_with_driver(
+    raw: Any, driver: Driver
+) -> tuple[tuple[ToolCall, ...], bool, str, tuple[str, ...]]:
+    """Evaluate one paid response through a synthesized Driver, locally."""
+    if not isinstance(raw, dict):
+        return (), False, "", ("response is not an object",)
+    parsed = parse_model_response_full(raw, driver)
+    calls: list[ToolCall] = []
+    is_batch = False
+    text_parts: list[str] = []
+    for event in parsed.events:
+        if isinstance(event, AssistantToolCall):
+            calls.append(event.call)
+            if event.content:
+                text_parts.append(event.content)
+        elif isinstance(event, ToolCallBatch):
+            calls.extend(event.calls)
+            is_batch = True
+            if event.content:
+                text_parts.append(event.content)
+        elif isinstance(event, AssistantText):
+            text_parts.append(event.content)
+    return tuple(calls), is_batch, "".join(text_parts), tuple(parsed.errors)
+
+
 class XptCompiler:
     def __init__(
         self,
@@ -171,12 +223,36 @@ class XptCompiler:
         tools, content, expected = probe_payload(probe, self.diag_inst)
         branch = self.session.new_branch(probe.config.driver())
         branch.add_user(content, tools)
-        syn, _ = branch.generate(
+        offered_names = {t.name for t in tools}
+        syn, generation = branch.generate(
             purpose="explore",
             label=probe.id,
             reason=self._reason,
-            offered_tool_names={t.name for t in tools},
+            offered_tool_names=offered_names,
         )
+        if (
+            syn.consensus == ParseConsensus.NONE
+            and isinstance(generation.response, dict)
+        ):
+            discovery = discover_response_parser(
+                generation.response,
+                offered_tool_names=offered_names,
+                expected_arguments=expected,
+            )
+            apply_discovered_response(
+                syn,
+                parser=discovery.parser,
+                calls=discovery.calls,
+                error=discovery.error,
+                offered_tool_names=offered_names,
+            )
+            generation.syndrome = syn.as_dict()
+            if discovery.ok:
+                self.session.ledger.note(
+                    "response discovery synthesized and locally validated "
+                    f"{discovery.parser.op!r} from the paid {probe.id} observation "
+                    f"({discovery.candidates_validated} agreeing candidate(s))"
+                )
         annotate_arguments(syn, tools, expected)
         ok = probe_succeeded(syn, expected, batch=probe.kind == "gauntlet_turn1")
         return syn, branch, ok
@@ -570,6 +646,113 @@ class XptCompiler:
                 return encoding, settled
         return None
 
+    def complete_discovered_trajectory(
+        self, traj: _Trajectory, parser: ResponsePrimitive
+    ) -> tuple[ToolResultEncoding, Driver] | None:
+        """Validate a synthesized response primitive across G2 and G3.
+
+        Parser parameters come only from G1.  Later paid outputs are validation
+        observations: they may confirm the same program (or native calls, which
+        the program composes alongside it), but they never mutate the candidate.
+        """
+        inst = self.diag_inst
+        expected = inst.expected_recovery_arguments()
+        for encoding in (ToolResultEncoding.TOOL_ROLE, ToolResultEncoding.USER_MESSAGE):
+            driver = _driver_from_discovered(traj.config, parser, encoding)
+            fork = traj.branch.fork(
+                driver,
+                reason=f"counterfactual tool-result encoding {encoding.value}",
+            )
+            assert fork.freeze() == traj.frozen_prefix
+            for call in traj.syndrome.discovered_calls:
+                if call.name == "record_gamma":
+                    fork.add_tool_error(
+                        call_id=call.id,
+                        name=call.name,
+                        error=inst.gamma_error_text(),
+                    )
+                else:
+                    fork.add_tool_result(
+                        call_id=call.id,
+                        name=call.name,
+                        content=inst.result_for(call.name),
+                    )
+
+            self.session.check_can_explore()
+            _, generation = fork.generate(
+                purpose="explore",
+                label=f"G2@{encoding.value}",
+                reason=(
+                    "validating the synthesized response parser against a second "
+                    "paid observation while resolving tool-result encoding"
+                ),
+                offered_tool_names={t.name for t in gauntlet_tools()},
+            )
+            calls, is_batch, _, errors = _observe_with_driver(
+                generation.response, driver
+            )
+            names = {call.name for call in calls}
+            values = {
+                call.name: call.arguments == expected.get(call.name) for call in calls
+            }
+            g2_ok = (
+                not errors
+                and is_batch
+                and names == set(RECOVERY_TOOLS)
+                and len(calls) == len(RECOVERY_TOOLS)
+                and all(values.get(name) for name in RECOVERY_TOOLS)
+            )
+            self.session.ledger.decide(
+                phase="result_encoding",
+                encoding=encoding.value,
+                observation=(
+                    "discovered_parser_validated"
+                    if g2_ok
+                    else "discovered_parser_rejected"
+                ),
+                parser=parser.model_dump(mode="json"),
+                parse_errors=list(errors),
+                succeeded=g2_ok,
+            )
+            if not g2_ok:
+                continue
+
+            for call in calls:
+                fork.add_tool_result(
+                    call_id=call.id,
+                    name=call.name,
+                    content=inst.recovery_results().get(call.name, {"status": "ok"}),
+                )
+            self.session.check_can_explore()
+            _, generation3 = fork.generate(
+                purpose="explore",
+                label=f"G3@{encoding.value}",
+                reason=(
+                    "validating synthesized-parser no-call termination with the ack sentinel"
+                ),
+                offered_tool_names={t.name for t in gauntlet_tools()},
+            )
+            final_calls, _, final_text, final_errors = _observe_with_driver(
+                generation3.response, driver
+            )
+            g3_ok = (
+                not final_errors
+                and not final_calls
+                and final_text.strip() == inst.ack_value
+            )
+            self.session.ledger.decide(
+                phase="termination",
+                encoding=encoding.value,
+                observation="final_ack" if g3_ok else "bad_or_ambiguous_termination",
+                parse_errors=list(final_errors),
+                succeeded=g3_ok,
+                final_text=final_text[:80],
+            )
+            if g3_ok:
+                traj.branch = fork
+                return encoding, driver
+        return None
+
     # ------------------------------------------------------------------
     # top level
     # ------------------------------------------------------------------
@@ -634,30 +817,50 @@ class XptCompiler:
                         "ambiguous parse at the first turn; refusing to guess"
                     )
                     continue
-                if not live:
-                    continue
-                result.equivalent_parsers = sorted(p.value for p in live)
-                settled = self.complete_trajectory(traj, live)
-                if settled is None:
+                discovered_parser = traj.syndrome.discovered_parser
+                driver: Driver | None = None
+                synthesis_reason: str
+                if discovered_parser is not None:
+                    result.equivalent_parsers = [
+                        f"discovered:{discovered_parser.op}"
+                    ]
+                    discovered = self.complete_discovered_trajectory(
+                        traj, discovered_parser
+                    )
+                    if discovered is not None:
+                        _, driver = discovered
+                    synthesis_reason = (
+                        "request configuration passed G1; a bounded local pass inferred "
+                        "response parser parameters from that paid output; the unchanged "
+                        "program then passed G2+G3 before independent certification"
+                    )
+                else:
+                    if not live:
+                        continue
+                    result.equivalent_parsers = sorted(p.value for p in live)
+                    settled = self.complete_trajectory(traj, live)
+                    if settled is not None:
+                        encoding, parser = settled
+                        driver = _driver_from(traj.config, parser, encoding)
+                    synthesis_reason = (
+                        "request configuration accepted only after the full stateful "
+                        "trajectory (G1+G2+G3); parser is the least-capable survivor of "
+                        "the compatible sets intersected across every observed turn; "
+                        "tool-result encoding from the counterfactual fork"
+                    )
+
+                if driver is None:
                     self._mark_trajectory_failed(traj.config)
                     self._safe_eliminate_wire_class(
                         traj.config,
                         reason="stateful trajectory failed after G1",
                     )
                     continue
-
-                encoding, parser = settled
-                driver = _driver_from(traj.config, parser, encoding)
                 self.session.ledger.decide(
                     phase="synthesis",
                     driver=driver.canonical_dict(),
                     configurations_attempted=attempts,
-                    reason=(
-                        "request configuration accepted only after the full stateful "
-                        "trajectory (G1+G2+G3); parser is the least-capable survivor of "
-                        "the compatible sets intersected across every observed turn; "
-                        "tool-result encoding from the counterfactual fork"
-                    ),
+                    reason=synthesis_reason,
                 )
 
                 try:

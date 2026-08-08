@@ -131,8 +131,22 @@ class FramedJsonToolCallsParser(_IRModel):
         return self
 
 
+class JsonObjectToolCallsParser(_IRModel):
+    """Extract strict tool-call objects embedded anywhere in assistant text.
+
+    This is deliberately structural rather than a named response format.  Only
+    JSON objects containing both configured tool-call fields are claimed; other
+    JSON in the surrounding assistant text is preserved.
+    """
+
+    op: Literal["json_object_tool_calls"] = "json_object_tool_calls"
+    fields: ToolCallFields = Field(default_factory=ToolCallFields)
+    multiple: bool = True
+    capture_surrounding_text: bool = False
+
+
 ResponsePrimitive = Annotated[
-    NativeToolCallsParser | FramedJsonToolCallsParser,
+    NativeToolCallsParser | FramedJsonToolCallsParser | JsonObjectToolCallsParser,
     Field(discriminator="op"),
 ]
 
@@ -213,8 +227,9 @@ def driver_grammar_size() -> int:
     """Size of the bounded legacy frontier currently searched online.
 
     The v0.2 protocol IR is parameterized and therefore has no honest finite
-    grammar size.  XPT deliberately starts with the proven 144-program v0.1
-    frontier and composes the winning observations into a v0.2 program.
+    grammar size.  XPT deliberately starts with the proven request choices from
+    the 144-program v0.1 frontier, then may synthesize a bounded response parser
+    primitive from observations before composing the v0.2 program.
     """
     return (
         len(ToolEncoding)
@@ -281,7 +296,7 @@ class Driver(BaseModel):
                 isinstance(op, JsonToolCatalogRequest) for op in self.protocol.request
             )
             non_native_parser = sum(
-                isinstance(op, FramedJsonToolCallsParser)
+                isinstance(op, (FramedJsonToolCallsParser, JsonObjectToolCallsParser))
                 for op in self.protocol.response
             )
             result_segments = max(0, len(self.protocol.tool_result.segments) - 1)
