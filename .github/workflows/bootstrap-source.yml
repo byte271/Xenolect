@@ -35,7 +35,7 @@ jobs:
           unzip -t /tmp/xenolect-source.zip
           unzip -o /tmp/xenolect-source.zip
           rm -rf .xenolect-bootstrap
-          rm -f .github/workflows/bootstrap-source.yml
+          rm -f .github/workflows/ci.yml
 
       - name: Publish source tree
         shell: bash
@@ -43,7 +43,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add -A -- . ':!.github/workflows'
           git diff --cached --quiet && exit 0
           git commit -m "Publish Xenolect v0.1.0 source"
           git push origin HEAD:main
