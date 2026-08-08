@@ -1,0 +1,57 @@
+name: Apply lazy proxy client startup fix
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/apply-lazy-client-hotfix.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Apply exact lazy-client change
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('xenolect/proxy.py')
+          s = p.read_text(encoding='utf-8')
+          old = '''    def __init__(self, target: ProxyTarget, *, client: OpenAICompatClient | None = None) -> None:\n        self.target = target\n        self.driver = target.driver\n        self.client = client or OpenAICompatClient(\n            base_url=target.base_url,\n            api_key=target.api_key,\n            model=target.model,\n            timeout=target.timeout,\n            temperature=None,\n            max_retries=1,\n        )\n'''
+          new = '''    def __init__(self, target: ProxyTarget, *, client: OpenAICompatClient | None = None) -> None:\n        self.target = target\n        self.driver = target.driver\n        self._client = client\n        self._client_lock = threading.Lock()\n\n    def _client_for_request(self) -> OpenAICompatClient:\n        client = self._client\n        if client is not None:\n            return client\n        with self._client_lock:\n            if self._client is None:\n                self._client = OpenAICompatClient(\n                    base_url=self.target.base_url,\n                    api_key=self.target.api_key,\n                    model=self.target.model,\n                    timeout=self.target.timeout,\n                    temperature=None,\n                    max_retries=1,\n                )\n            return self._client\n'''
+          if old not in s:
+              raise SystemExit('ProxyService init no longer matches expected source')
+          s = s.replace(old, new)
+          old_call = '            raw = self.client.chat_completions(messages, tools=tools, **kwargs)'
+          new_call = '            raw = self._client_for_request().chat_completions(messages, tools=tools, **kwargs)'
+          if old_call not in s:
+              raise SystemExit('ProxyService chat call no longer matches expected source')
+          s = s.replace(old_call, new_call)
+          old_close = '''    def close(self) -> None:\n        close = getattr(self.client, "close", None)\n        if callable(close):\n            close()\n'''
+          new_close = '''    def close(self) -> None:\n        with self._client_lock:\n            client = self._client\n            self._client = None\n        if client is not None:\n            client.close()\n'''
+          if old_close not in s:
+              raise SystemExit('ProxyService close no longer matches expected source')
+          p.write_text(s.replace(old_close, new_close), encoding='utf-8')
+          PY
+      - name: Validate focused regressions
+        run: |
+          python -m pip install -e ".[dev]"
+          python -m pytest -q tests/test_proxy.py tests/test_service.py tests/test_service_e2e.py
+          python -m compileall -q xenolect
+      - name: Commit and remove one-shot workflow
+        shell: bash
+        run: |
+          rm .github/workflows/apply-lazy-client-hotfix.yml
+          git config user.name "Byte271"
+          git config user.email "yihac1@outlook.com"
+          git add xenolect/proxy.py .github/workflows/apply-lazy-client-hotfix.yml
+          git commit -m "Lazy-load upstream clients in background proxy"
+          git push origin HEAD:main
