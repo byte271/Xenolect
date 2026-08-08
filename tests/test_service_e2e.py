@@ -48,9 +48,11 @@ def test_real_background_process_models_chat_and_kill(tmp_path: Path, monkeypatc
     combined = repo_root if not old_pythonpath else os.pathsep.join([repo_root, old_pythonpath])
     monkeypatch.setenv("PYTHONPATH", combined)
 
+    # Bind the fake upstream first, but do not start its serving thread until
+    # Xenolect itself is healthy. The real `xenolect install` path launches the
+    # background service from a single-threaded CLI; starting a server thread
+    # before process creation adds an unrelated POSIX process-launch edge case.
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
-    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
-    thread.start()
     upstream_url = f"http://127.0.0.1:{upstream.server_port}/v1"
 
     xhome = tmp_path / "xhome"
@@ -72,8 +74,11 @@ def test_real_background_process_models_chat_and_kill(tmp_path: Path, monkeypatc
             print("\n--- Xenolect child service.log ---")
             print(log_path.read_text(encoding="utf-8", errors="replace"))
             print("--- end service.log ---\n")
+        upstream.server_close()
         raise
 
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
     try:
         with urllib.request.urlopen(state.base_url + "/models", timeout=3) as response:  # noqa: S310 - loopback
             models = json.loads(response.read())
@@ -97,4 +102,5 @@ def test_real_background_process_models_chat_and_kill(tmp_path: Path, monkeypatc
         stopped = stop_background_service(home=xhome, disable_autostart=True)
         upstream.shutdown()
         upstream.server_close()
+        thread.join(timeout=2.0)
     assert stopped.running is False
