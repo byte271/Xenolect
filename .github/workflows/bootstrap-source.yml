@@ -19,7 +19,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat .xenolect-bootstrap/part-*.b64 | base64 -d > /tmp/xenolect-source.zip
+          cat \
+            .xenolect-bootstrap/part-00.b64 \
+            .xenolect-bootstrap/part-01.b64 \
+            .xenolect-bootstrap/part-02.b64 \
+            .xenolect-bootstrap/part-03.b64 \
+            .xenolect-bootstrap/part-04.b64 \
+            .xenolect-bootstrap/part-05.b64 \
+            .xenolect-bootstrap/part-06.b64 \
+            .xenolect-bootstrap/part-07.b64 \
+            .xenolect-bootstrap/part-08.b64 \
+            .xenolect-bootstrap/part-09.b64 \
+            | base64 -d > /tmp/xenolect-source.zip
+          echo "073f4cad8e7af0f53fd642e6cecca4041a503daefa405f6bed22c2191a51aae3  /tmp/xenolect-source.zip" | sha256sum -c -
           unzip -t /tmp/xenolect-source.zip
           unzip -o /tmp/xenolect-source.zip
           rm -rf .xenolect-bootstrap
