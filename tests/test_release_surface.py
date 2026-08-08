@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from click import unstyle
 from typer.testing import CliRunner
 
 from xenolect import __version__
@@ -17,18 +18,20 @@ def test_release_version_is_consistent() -> None:
 def test_normal_cli_surface_does_not_expose_internal_commands() -> None:
     result = CliRunner().invoke(app, ["--help"])
     assert result.exit_code == 0
+    output = unstyle(result.stdout)
     for command in ("install", "kill", "ban", "status", "version"):
-        assert command in result.stdout
+        assert command in output
     for internal in ("serve", "xpt", "compile", "eval", "mock", "gate"):
-        assert internal not in result.stdout.lower()
+        assert internal not in output.lower()
 
 
 def test_install_help_only_exposes_user_option() -> None:
     result = CliRunner().invoke(app, ["install", "--help"])
     assert result.exit_code == 0
-    assert "--verbose" in result.stdout
+    output = unstyle(result.stdout)
+    assert "--verbose" in output
     for internal in ("--base-url", "--model", "--api-key", "--deadline", "--max-generations", "--force"):
-        assert internal not in result.stdout
+        assert internal not in output
 
 
 def test_release_metadata_declares_three_supported_desktop_platforms() -> None:
