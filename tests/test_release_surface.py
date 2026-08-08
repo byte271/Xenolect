@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 from typer.testing import CliRunner
 
 from xenolect import __version__
 from xenolect.cli.main import app
-
 
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -17,9 +16,14 @@ def _plain(text: str) -> str:
 
 
 def test_release_version_is_consistent() -> None:
-    assert __version__ == "0.1.0"
+    assert __version__ == "0.2.0"
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.1.0"' in pyproject
+    assert 'version = "0.2.0"' in pyproject
+    readme = Path("README.md").read_text(encoding="utf-8")
+    assert readme.startswith("# Xenolect v0.2.0\n")
+    assert "xenolect-0.2.0-py3-none-any.whl" in readme
+    changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+    assert "## 0.2.0 - 2026-08-08" in changelog
 
 
 def test_normal_cli_surface_does_not_expose_internal_commands() -> None:
@@ -37,7 +41,14 @@ def test_install_help_only_exposes_user_option() -> None:
     assert result.exit_code == 0
     output = _plain(result.stdout)
     assert "--verbose" in output
-    for internal in ("--base-url", "--model", "--api-key", "--deadline", "--max-generations", "--force"):
+    for internal in (
+        "--base-url",
+        "--model",
+        "--api-key",
+        "--deadline",
+        "--max-generations",
+        "--force",
+    ):
         assert internal not in output
 
 
