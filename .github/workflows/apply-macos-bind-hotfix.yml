@@ -1,0 +1,63 @@
+name: Apply macOS loopback bind fix
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/apply-macos-bind-hotfix.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Apply exact loopback server change
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('xenolect/proxy.py')
+          s = p.read_text(encoding='utf-8')
+          old_import = 'from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\nfrom typing import Any, Iterable\n'
+          new_import = 'from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\nfrom socketserver import TCPServer\nfrom typing import Any, Iterable\n'
+          if old_import not in s:
+              raise SystemExit('proxy import block no longer matches expected source')
+          s = s.replace(old_import, new_import)
+
+          marker = '\n\nclass ProxyError(RuntimeError):\n'
+          server_class = '''\n\nclass _LoopbackHTTPServer(ThreadingHTTPServer):\n    \"\"\"HTTP server that never performs hostname/reverse-DNS lookup on bind.\"\"\"\n\n    def server_bind(self) -> None:\n        # HTTPServer.server_bind() calls socket.getfqdn(host). On macOS this can\n        # block for many seconds in mDNS even for 127.0.0.1. Xenolect is a\n        # loopback-only service and never needs a DNS-derived server name.\n        TCPServer.server_bind(self)\n        host, port = self.socket.getsockname()[:2]\n        self.server_name = str(host)\n        self.server_port = int(port)\n'''
+          if marker not in s:
+              raise SystemExit('ProxyError marker missing')
+          s = s.replace(marker, server_class + marker, 1)
+
+          old_serve = '    server = ThreadingHTTPServer((host, port), make_handler(service))'
+          new_serve = '    server = _LoopbackHTTPServer((host, port), make_handler(service))'
+          if old_serve not in s:
+              raise SystemExit('serve construction no longer matches expected source')
+          p.write_text(s.replace(old_serve, new_serve), encoding='utf-8')
+
+          Path('tests/test_loopback_server.py').write_text('''from __future__ import annotations\n\nimport socket\nfrom http.server import BaseHTTPRequestHandler\n\nfrom xenolect.proxy import _LoopbackHTTPServer\n\n\ndef test_loopback_server_bind_never_performs_dns_lookup(monkeypatch) -> None:\n    def fail_dns(*_args, **_kwargs):\n        raise AssertionError(\"loopback bind must not perform DNS lookup\")\n\n    monkeypatch.setattr(socket, \"getfqdn\", fail_dns)\n    server = _LoopbackHTTPServer((\"127.0.0.1\", 0), BaseHTTPRequestHandler)\n    try:\n        assert server.server_name == \"127.0.0.1\"\n        assert server.server_port > 0\n    finally:\n        server.server_close()\n''', encoding='utf-8')
+          PY
+      - name: Validate focused regressions
+        run: |
+          python -m pip install -e ".[dev]"
+          python -m pytest -q tests/test_loopback_server.py tests/test_proxy.py tests/test_service.py tests/test_service_e2e.py
+          python -m compileall -q xenolect
+      - name: Commit and remove diagnostics
+        shell: bash
+        run: |
+          rm -f .github/workflows/diagnose-macos-service.yml
+          rm .github/workflows/apply-macos-bind-hotfix.yml
+          git config user.name "Byte271"
+          git config user.email "yihac1@outlook.com"
+          git add xenolect/proxy.py tests/test_loopback_server.py .github/workflows/diagnose-macos-service.yml .github/workflows/apply-macos-bind-hotfix.yml
+          git commit -m "Avoid reverse DNS when binding local proxy"
+          git push origin HEAD:main
