@@ -1,11 +1,18 @@
 """Release-level checks that the installed Driver is real protocol machinery.
 
-These tests deliberately avoid claiming arbitrary protocol synthesis.  v0.1.0
-compiles one Driver from a finite typed grammar and the proxy must then apply
-that Driver to *client-supplied* tools and tool-result history.
+These tests preserve the legacy v0.1.0 frontier and runtime truth claims.  The
+v0.2.0 response-synthesis milestone is covered separately; it does not weaken
+the requirement that the proxy apply a certified Driver to *client-supplied*
+tools and tool-result history.
 """
 
-from xenolect.driver.ir import Driver, ParserKind, ToolEncoding, ToolResultEncoding, driver_grammar_size
+from xenolect.driver.ir import (
+    Driver,
+    ParserKind,
+    ToolEncoding,
+    ToolResultEncoding,
+    driver_grammar_size,
+)
 from xenolect.proxy import translate_request, translate_response
 from xenolect.xpt.planner import all_request_configs
 
@@ -57,7 +64,10 @@ def test_installed_driver_rewrites_actual_client_tool_protocol() -> None:
             {
                 "message": {
                     "role": "assistant",
-                    "content": '<tool_call>{"name":"lookup","arguments":{"key":"x"},"id":"c1"}</tool_call>',
+                    "content": (
+                        '<tool_call>{"name":"lookup","arguments":{"key":"x"},'
+                        '"id":"c1"}</tool_call>'
+                    ),
                 }
             }
         ]

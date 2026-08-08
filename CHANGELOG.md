@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 - 2026-08-08
+
+### Driver protocol IR
+
+- Added a backward-compatible Driver IR v0.2 protocol program composed from typed request, response, tool-result, and state primitives.
+- Replaced hardcoded tagged/XML execution branches with parameterized strict JSON framing and field mapping.
+- Added multiple-parser agreement checks and optional preservation of assistant text beside tool calls.
+- Added bounded, deterministic local discovery of strict whole-content and embedded JSON response parsers, including arbitrary literal frames, custom call fields, mixed assistant text, and multiple calls.
+- Parser candidates are inferred from already-paid observations, revalidated across the stateful trajectory, and must still pass fresh production-runtime certification before emission.
+- Added a holdout endpoint test proving synthesis of a v0.2 response program outside all three legacy parsers and the previous 144-program grammar.
+- XPT retains the proven bounded request frontier, 12-generation budget, three-generation certification reserve, fresh certification, and 300-second default deadline.
+- Existing v0.1 Driver serialization and content hashes remain stable; unknown or incomplete v0.2 programs fail closed.
+
 ## 0.1.0
 
 First alpha release of Xenolect's local model compatibility layer.

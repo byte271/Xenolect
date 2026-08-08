@@ -20,7 +20,9 @@ from xenolect.driver.ir import (
     ParserKind,
     SchemaTransform,
     ToolEncoding,
+    ToolResultEncoding,
     canonical_schema_transforms,
+    composed_driver,
 )
 from xenolect.eval.schema import validate_tool_arguments
 from xenolect.xpt.gauntlet import (
@@ -53,9 +55,10 @@ class RequestConfig:
         return f"{self.tool_encoding}[{'+'.join(self.transforms) or '-'}]"
 
     def driver(self, parser: str | None = None) -> Driver:
-        return Driver(
+        return composed_driver(
             tool_encoding=ToolEncoding(self.tool_encoding),
             parser=ParserKind(parser or self.tool_encoding),
+            tool_result_encoding=ToolResultEncoding.TOOL_ROLE,
             schema_transforms=[SchemaTransform(t) for t in self.transforms],
         )
 
@@ -135,9 +138,7 @@ def annotate_arguments(
     syn: Syndrome, tools: list[ToolDef], expected: dict[str, dict[str, Any]]
 ) -> None:
     schema_by_name = {t.name: t.parameters for t in tools}
-    if syn.accepted_parser is None:
-        return
-    for call in syn.parser_outcomes[syn.accepted_parser].calls:
+    for call in syn.accepted_calls:
         schema = schema_by_name.get(call.name)
         if schema is not None:
             ok, _ = validate_tool_arguments(call.arguments, schema)

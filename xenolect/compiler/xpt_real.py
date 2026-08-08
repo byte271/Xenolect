@@ -46,9 +46,12 @@ class RealCompileReport:
             "discovery_s": self.discovery_s,
             "output_driver": self.output_driver,
             "compiler": {
-                "mode": "black_box_finite_driver_grammar",
+                "mode": "composable_driver_ir_bounded_frontier",
                 "driver_grammar_version": DRIVER_GRAMMAR_VERSION,
                 "driver_grammar_size": driver_grammar_size(),
+                "online_frontier_size": driver_grammar_size(),
+                "parameterized_protocol_ir": True,
+                "bounded_response_parser_synthesis": True,
                 "arbitrary_state_machine_synthesis": False,
             },
             "xpt": self.xpt.as_dict(),

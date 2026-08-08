@@ -1,14 +1,14 @@
-# Xenolect v0.1.0
+# Xenolect v0.2.0
 
 Xenolect is a local compatibility layer for model servers that expose an OpenAI-style Chat Completions API.
 
-It probes a selected model through black-box interactions, compiles a verified **Driver** from the v0.1.0 typed compatibility grammar, stores that Driver locally, and runs one loopback endpoint that existing OpenAI-style apps can use.
+It probes a selected model through black-box interactions, compiles a verified **Driver** from the composable v0.2 protocol language, stores that Driver locally, and runs one loopback endpoint that existing OpenAI-style apps can use.
 
-> **v0.1.0 is an alpha release.** It is intentionally small and focused on Chat Completions + function tool calling. It is not a full implementation of every OpenAI API, and it does not synthesize arbitrary protocol programs yet.
+> **v0.2.0 is an alpha release.** It is intentionally small and focused on Chat Completions + function tool calling. It is not a full implementation of every OpenAI API, and it does not synthesize arbitrary protocol programs yet.
 
 ## Supported platforms
 
-Xenolect v0.1.0 supports:
+Xenolect v0.2.0 supports:
 
 - Windows 10/11
 - macOS
@@ -29,11 +29,11 @@ Failure to register login startup does **not** invalidate a successfully prepare
 
 This distinction matters.
 
-Xenolect v0.1.0 does not invent application tools such as search, weather, filesystem access, or shell commands. Your app supplies its normal function tools.
+Xenolect v0.2.0 does not invent application tools such as search, weather, filesystem access, or shell commands. Your app supplies its normal function tools.
 
 Xenolect compiles the **protocol Driver used to carry those tools through the selected model**. On every request it can transform the app's actual tool schemas, change how tools are presented to the model, parse model-emitted calls, translate tool-result history, and normalize the response back to OpenAI-style `tool_calls`.
 
-The v0.1.0 Driver grammar is deliberately finite:
+The legacy v0.1.0 seed grammar is deliberately finite:
 
 - 3 tool-request encodings: native, tagged JSON text, XML+JSON text
 - 3 independent schema transforms, giving 8 transform subsets
@@ -42,7 +42,15 @@ The v0.1.0 Driver grammar is deliberately finite:
 
 That is **144 representable Driver programs** in v0.1.0.
 
-Xenolect uses black-box probing and a stateful certification trajectory to infer and verify one of those programs. It does not brute-force all 144 against the real model, but it also does not claim to generate arbitrary new state-machine logic outside this grammar. If the model needs behavior the grammar cannot express, setup fails rather than pretending compatibility.
+The v0.1.0 compiler used black-box probing and a stateful certification trajectory to infer and verify one of those programs. v0.2.0 preserves those proven request configurations as its bounded starting frontier, but response parser synthesis is no longer limited to the three legacy parser names. If observed behavior cannot be represented or certified, setup fails rather than pretending compatibility.
+
+Driver IR v0.2 is the current release format. It adds a composable foundation without widening the expensive online search budget. XPT still begins with the proven request configurations from the legacy 144-program frontier, then composes the observed request presentation, response parser, tool-result renderer, schema transforms, and required batch-state actions into a parameterized protocol program. The runtime executes those primitives rather than branching directly on three format names.
+
+The parameterized primitives can represent native calls, strict whole-content JSON calls, custom tagged or XML-style JSON frames, custom object field names, multiple agreeing response parsers, segmented tool-result messages, and assistant text carried beside tool calls. Existing v0.1 `.mdriver` files retain their previous JSON shape and content hash.
+
+XPT can now make one specific synthesis step beyond that fixed grammar: when the legacy response parsers produce no calls, it deterministically inspects the already-paid response for strict whole-content or embedded JSON tool objects, infers custom field names and adjacent literal delimiters, and validates the resulting response primitive across the remaining trajectory. Extraction is bounded; ambiguous field mappings, call IDs, or parser results fail closed. A Driver is still emitted only after the independent fresh-instance certification path passes.
+
+This is not a claim of arbitrary protocol synthesis. Request and tool-result exploration remain bounded, arbitrary state transitions remain unsupported, and every compile stays inside the same 12-generation and 300-second defaults with three generations reserved for certification.
 
 The diagnostic tools used during `xenolect install` are temporary conformance probes. They are not the tools your app later uses. At runtime, Xenolect transforms the real tools supplied by your app according to the installed Driver.
 
@@ -58,7 +66,7 @@ Common local servers are scanned automatically. If none is found, Xenolect asks 
 ### Windows
 
 ```powershell
-py -m pip install .\xenolect-0.1.0-py3-none-any.whl
+py -m pip install .\xenolect-0.2.0-py3-none-any.whl
 xenolect install
 ```
 
@@ -71,7 +79,7 @@ py -m xenolect install
 ### macOS
 
 ```bash
-python3 -m pip install ./xenolect-0.1.0-py3-none-any.whl
+python3 -m pip install ./xenolect-0.2.0-py3-none-any.whl
 xenolect install
 ```
 
@@ -84,7 +92,7 @@ python3 -m xenolect install
 ### Linux
 
 ```bash
-python3 -m pip install ./xenolect-0.1.0-py3-none-any.whl
+python3 -m pip install ./xenolect-0.2.0-py3-none-any.whl
 xenolect install
 ```
 
@@ -135,7 +143,7 @@ Xenolect will:
 3. show the models it found;
 4. ask you to choose one;
 5. ask for another port/address if no usable model is found;
-6. probe and compile a compatibility Driver from the v0.1.0 grammar;
+6. probe and compile a compatibility Driver with the bounded v0.2 compiler;
 7. verify it on a fresh stateful tool trajectory;
 8. save the verified Driver;
 9. start the local Xenolect service;
@@ -160,7 +168,7 @@ Model    qwen3-4b-ctx4k:latest
 API key  Any non-empty value (only if your app requires one)
 ```
 
-The API-key field above is only a placeholder for clients that refuse an empty value. **Xenolect v0.1.0 does not use that value as local authentication.**
+The API-key field above is only a placeholder for clients that refuse an empty value. **Xenolect v0.2.0 does not use that value as local authentication.**
 
 ## Commands
 
@@ -206,7 +214,7 @@ This stops the local service and attempts to disable the current platform's per-
 xenolect version
 ```
 
-## API surface in v0.1.0
+## API surface in v0.2.0
 
 Xenolect exposes a local loopback service and supports:
 
@@ -219,11 +227,11 @@ Xenolect exposes a local loopback service and supports:
 - `stream=true` as **buffered SSE compatibility streaming**
 - `stream_options.include_usage` when upstream usage data is available
 
-Buffered streaming means Xenolect first receives the complete upstream completion, then emits valid SSE chunks. **v0.1.0 does not provide token-by-token upstream streaming latency.**
+Buffered streaming means Xenolect first receives the complete upstream completion, then emits valid SSE chunks. **v0.2.0 does not provide token-by-token upstream streaming latency.**
 
-The following are **not** claimed by v0.1.0:
+The following are **not** claimed by v0.2.0:
 
-- arbitrary state-machine Driver synthesis outside the 144-program v0.1.0 grammar
+- arbitrary request, tool-result, or state-machine Driver synthesis; the v0.2 milestone currently adds bounded response-parser synthesis only
 - creation of application tools or tool implementations
 - `/v1/responses`
 - embeddings
@@ -237,11 +245,11 @@ Fields outside the verified tool-calling path may be forwarded to the upstream s
 
 ## Local security model
 
-The background service binds to a loopback address only. It is not intended to be exposed on a LAN or the public internet. Any process running as your local user can still connect to a loopback service; v0.1.0 does not provide local client authentication.
+The background service binds to a loopback address only. It is not intended to be exposed on a LAN or the public internet. Any process running as your local user can still connect to a loopback service; v0.2.0 does not provide local client authentication.
 
 Browser cross-origin access is restricted to loopback origins. Chat requests require JSON content type. Xenolect does not store upstream API keys in its Driver registry.
 
-Credentialed remote upstreams are not a first-class persistent setup in v0.1.0; the release is primarily intended for local model servers.
+Credentialed remote upstreams are not a first-class persistent setup in v0.2.0; the release is primarily intended for local model servers.
 
 ## Local data
 

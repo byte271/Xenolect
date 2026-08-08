@@ -26,14 +26,23 @@ from typing import Any, Iterable
 from urllib.parse import urlsplit
 
 from xenolect import __version__
-from xenolect.abi.events import AssistantText, AssistantToolCall, ToolCall, ToolCallBatch, ToolDef, ToolResult
+from xenolect.abi.events import (
+    AssistantText,
+    AssistantToolCall,
+    ToolCall,
+    ToolCallBatch,
+    ToolDef,
+    ToolResult,
+)
 from xenolect.driver.encode import (
-    build_system_tool_preamble,
+    build_tool_preamble_messages,
+    encode_textual_tool_call,
     encode_tool_result_message,
     should_send_native_tools,
     tools_for_request,
+    uses_textual_tool_catalog,
 )
-from xenolect.driver.ir import Driver, ToolEncoding
+from xenolect.driver.ir import Driver
 from xenolect.driver.parse import parse_model_response_full, strict_json_loads
 from xenolect.endpoints.errors import ClientError
 from xenolect.endpoints.http import OpenAICompatClient
@@ -160,16 +169,13 @@ def _canonical_call(tc: Any, *, context: str) -> ToolCall:
     )
 
 
-def _textual_call(call: ToolCall, encoding: ToolEncoding) -> str:
-    obj: dict[str, Any] = {"name": call.name, "arguments": call.arguments}
-    if call.id is not None:
-        obj["id"] = call.id
-    payload = json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
-    if encoding == ToolEncoding.TAGGED_JSON:
-        return f"TOOL_CALL {payload}"
-    if encoding == ToolEncoding.XML_JSON:
-        return f"<tool_call>{payload}</tool_call>"
-    raise AssertionError("textual call requested for native encoding")
+def _textual_call(call: ToolCall, driver: Driver) -> str:
+    return encode_textual_tool_call(
+        name=call.name,
+        arguments=call.arguments,
+        call_id=call.id,
+        driver=driver,
+    )
 
 
 def translate_request(body: dict[str, Any], driver: Driver, upstream_model: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None, dict[str, Any]]:
@@ -196,7 +202,8 @@ def translate_request(body: dict[str, Any], driver: Driver, upstream_model: str)
     tool_defs = _tool_defs(body.get("tools"))
     wire_tools = tools_for_request(tool_defs, driver) if (tool_defs and should_send_native_tools(driver)) else None
 
-    if driver.tool_encoding != ToolEncoding.NATIVE:
+    textual_tools = uses_textual_tool_catalog(driver)
+    if textual_tools:
         if body.get("tool_choice") not in (None, "auto"):
             raise ProxyError(
                 "tool_choice other than auto is not representable by this installed textual-tool driver",
@@ -233,7 +240,7 @@ def translate_request(body: dict[str, Any], driver: Driver, upstream_model: str)
                 for call in calls:
                     if call.id is not None:
                         call_names[call.id] = call.name
-                if driver.tool_encoding == ToolEncoding.NATIVE:
+                if not textual_tools:
                     msg = {k: v for k, v in raw.items() if not str(k).startswith("_")}
                     messages.append(msg)
                 else:
@@ -241,7 +248,7 @@ def translate_request(body: dict[str, Any], driver: Driver, upstream_model: str)
                     content = raw.get("content")
                     if isinstance(content, str) and content:
                         pieces.append(content)
-                    pieces.extend(_textual_call(c, driver.tool_encoding) for c in calls)
+                    pieces.extend(_textual_call(c, driver) for c in calls)
                     messages.append({"role": "assistant", "content": "\n".join(pieces)})
             else:
                 messages.append({k: v for k, v in raw.items() if not str(k).startswith("_")})
@@ -260,17 +267,17 @@ def translate_request(body: dict[str, Any], driver: Driver, upstream_model: str)
 
         raise ProxyError(f"messages[{i}] has unsupported role {role!r}")
 
-    preamble = build_system_tool_preamble(tool_defs, driver) if tool_defs else None
-    if preamble:
-        messages.insert(0, {"role": "system", "content": preamble})
+    preambles = build_tool_preamble_messages(tool_defs, driver) if tool_defs else []
+    for preamble in reversed(preambles):
+        messages.insert(0, preamble)
 
     kwargs: dict[str, Any] = {"model": upstream_model}
     for key in ("temperature", "top_p", "seed"):
         if key in body:
             kwargs[key] = body[key]
-    if driver.tool_encoding == ToolEncoding.NATIVE and "tool_choice" in body:
+    if should_send_native_tools(driver) and not textual_tools and "tool_choice" in body:
         kwargs["tool_choice"] = body["tool_choice"]
-    if driver.tool_encoding == ToolEncoding.NATIVE and "parallel_tool_calls" in body:
+    if should_send_native_tools(driver) and not textual_tools and "parallel_tool_calls" in body:
         kwargs.setdefault("extra_body", {})["parallel_tool_calls"] = body["parallel_tool_calls"]
     if "max_tokens" in body:
         kwargs["max_tokens"] = body["max_tokens"]
@@ -333,19 +340,17 @@ def translate_response(raw: dict[str, Any], driver: Driver, client_model: str) -
             text_parts.append(event.content)
         elif isinstance(event, AssistantToolCall):
             calls.append(event.call)
+            if event.content:
+                text_parts.append(event.content)
         elif isinstance(event, ToolCallBatch):
             calls.extend(event.calls)
+            if event.content:
+                text_parts.append(event.content)
 
-    if calls and text_parts:
-        # Current ABI parsers do not intentionally produce mixed events.  Fail
-        # closed if a future parser does, rather than silently dropping content.
-        raise ProxyError(
-            "driver produced mixed assistant text and tool calls, unsupported by Tool ABI v0",
-            status=502,
-            code="mixed_assistant_output",
-        )
-
-    message: dict[str, Any] = {"role": "assistant", "content": None if calls else "".join(text_parts)}
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": "".join(text_parts) if text_parts else None if calls else "",
+    }
     finish_reason = "stop"
     if calls:
         message["tool_calls"] = [_canonical_tool_call(c, i) for i, c in enumerate(calls)]

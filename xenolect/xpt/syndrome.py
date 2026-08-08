@@ -24,7 +24,7 @@ from enum import Enum
 from typing import Any
 
 from xenolect.abi.events import AssistantText, AssistantToolCall, ToolCall, ToolCallBatch
-from xenolect.driver.ir import Driver, ParserKind
+from xenolect.driver.ir import Driver, ParserKind, ResponsePrimitive
 from xenolect.driver.parse import parse_model_response_full
 
 ALL_PARSERS: tuple[ParserKind, ...] = tuple(ParserKind)
@@ -123,6 +123,9 @@ class Syndrome:
     consensus: ParseConsensus = ParseConsensus.NONE
     accepted_parser: ParserKind | None = None
     compatible_parsers: tuple[ParserKind, ...] = ()
+    discovered_parser: ResponsePrimitive | None = None
+    discovered_calls: tuple[ToolCall, ...] = ()
+    discovery_error: str | None = None
 
     # normalized observations from the accepted parse
     tool_call_emitted: bool = False
@@ -152,6 +155,12 @@ class Syndrome:
             "consensus": self.consensus.value,
             "accepted_parser": self.accepted_parser.value if self.accepted_parser else None,
             "compatible_parsers": [p.value for p in self.compatible_parsers],
+            "discovered_parser": (
+                self.discovered_parser.model_dump(mode="json")
+                if self.discovered_parser is not None
+                else None
+            ),
+            "discovery_error": self.discovery_error,
             "tool_call_emitted": self.tool_call_emitted,
             "n_calls": self.n_calls,
             "parallel_batch_present": self.parallel_batch_present,
@@ -172,6 +181,11 @@ class Syndrome:
                 "t": self.transport_ok,
                 "c": self.consensus.value,
                 "p": sorted(p.value for p in self.compatible_parsers),
+                "dp": (
+                    self.discovered_parser.model_dump(mode="json")
+                    if self.discovered_parser is not None
+                    else None
+                ),
                 "e": self.tool_call_emitted,
                 "n": self.n_calls,
                 "b": self.parallel_batch_present,
@@ -181,6 +195,45 @@ class Syndrome:
                 "sv": dict(sorted(self.args_schema_valid.items())),
                 "vv": dict(sorted(self.args_values_correct.items())),
             }
+        )
+
+    @property
+    def accepted_calls(self) -> tuple[ToolCall, ...]:
+        if self.discovered_parser is not None:
+            return self.discovered_calls
+        if self.accepted_parser is None:
+            return ()
+        return self.parser_outcomes[self.accepted_parser].calls
+
+
+def apply_discovered_response(
+    syn: Syndrome,
+    *,
+    parser: ResponsePrimitive | None,
+    calls: tuple[ToolCall, ...] = (),
+    error: str | None = None,
+    offered_tool_names: set[str] | None = None,
+) -> None:
+    """Attach a locally synthesized response parse to an otherwise call-free syndrome."""
+    syn.discovery_error = error
+    if parser is None or not calls:
+        return
+    if syn.consensus != ParseConsensus.NONE or syn.accepted_parser is not None:
+        raise ValueError("response discovery may only refine a call-free legacy parse")
+    syn.discovered_parser = parser
+    syn.discovered_calls = calls
+    syn.consensus = ParseConsensus.UNIQUE
+    syn.tool_call_emitted = True
+    syn.n_calls = len(calls)
+    syn.parallel_batch_present = len(calls) > 1
+    syn.tool_names = tuple(call.name for call in calls)
+    ids = [call.id for call in calls]
+    syn.call_ids_present = bool(ids) and all(call_id is not None for call_id in ids)
+    present_ids = [call_id for call_id in ids if call_id is not None]
+    syn.call_ids_unique = len(set(present_ids)) == len(present_ids)
+    if offered_tool_names is not None:
+        syn.unknown_tool_names = tuple(
+            sorted({name for name in syn.tool_names if name not in offered_tool_names})
         )
 
 

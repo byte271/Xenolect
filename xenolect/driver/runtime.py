@@ -8,8 +8,8 @@ Parallel batch invariant (Tool ABI v0):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import hashlib
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from xenolect.abi.events import (
@@ -24,12 +24,12 @@ from xenolect.abi.events import (
     UserMessage,
 )
 from xenolect.driver.encode import (
-    build_system_tool_preamble,
+    build_tool_preamble_messages,
     encode_tool_result_message,
     should_send_native_tools,
     tools_for_request,
 )
-from xenolect.driver.ir import Driver
+from xenolect.driver.ir import Driver, StateAction, effective_protocol
 from xenolect.driver.parse import parse_model_response_full
 from xenolect.driver.termination import ProbeRunResult, Termination
 from xenolect.endpoints.errors import ClientError, FailureDomain
@@ -83,20 +83,26 @@ class DriverRuntime:
         if message.tools:
             self.tools = list(message.tools)
 
-        preamble = build_system_tool_preamble(self.tools, self.driver)
-        if preamble and not any(
-            m.get("role") == "system" and m.get("_xenolect_preamble") for m in self.model_messages
+        preambles = build_tool_preamble_messages(self.tools, self.driver)
+        if preambles and not any(
+            m.get("_xenolect_preamble") for m in self.model_messages
         ):
-            self.model_messages.insert(
-                0,
-                {"role": "system", "content": preamble, "_xenolect_preamble": True},
-            )
+            for index, preamble in reversed(list(enumerate(preambles))):
+                self.model_messages.insert(
+                    0,
+                    {
+                        **preamble,
+                        "_xenolect_preamble": True,
+                        "_xenolect_preamble_index": index,
+                    },
+                )
 
         self.model_messages.append({"role": "user", "content": message.content})
         return self._resume_model()
 
     def register_calls(self, calls: list[ToolCall]) -> None:
         """Record outstanding calls after an assistant tool turn."""
+        self._require_state_action(StateAction.TRACK_OUTSTANDING_CALLS)
         for call in calls:
             if call.id is not None:
                 self.outstanding[call.id] = call.name
@@ -108,6 +114,7 @@ class DriverRuntime:
 
     def append_tool_result(self, result: ToolResult | ToolError) -> None:
         """Inject one tool result into history without resuming the model."""
+        self._require_state_action(StateAction.APPEND_TOOL_RESULTS)
         if isinstance(result, ToolError):
             tr = ToolResult(
                 call_id=result.call_id,
@@ -138,6 +145,7 @@ class DriverRuntime:
         resume_model once — or handle_tool_results.
         """
         self.append_tool_result(result)
+        self._require_state_action(StateAction.RESUME_WHEN_ALL_RESULTS)
         if self.ready_to_resume():
             return self.resume_model()
         return []
@@ -146,12 +154,20 @@ class DriverRuntime:
         """Inject all results for the current outstanding batch, then resume once."""
         for r in results:
             self.append_tool_result(r)
+        self._require_state_action(StateAction.RESUME_WHEN_ALL_RESULTS)
         if not self.ready_to_resume():
             # Incomplete batch: do not resume the model. Callers that treat an
             # empty event list as "no more tool calls" must check ready_to_resume
             # (run_probe does) so this is not silently COMPLETED.
             return []
         return self.resume_model()
+
+    def _require_state_action(self, action: StateAction) -> None:
+        """Fail clearly if a bypassed/foreign IR requests unsupported state logic."""
+        if action not in effective_protocol(self.driver).state:
+            raise RuntimeError(
+                f"Driver state program does not provide required action {action.value!r}"
+            )
 
     def run_probe_script(
         self,
@@ -385,7 +401,7 @@ class DriverRuntime:
                     self.model_messages.append(
                         {
                             "role": "assistant",
-                            "content": None,
+                            "content": e.content,
                             "tool_calls": [_tc_wire(e.call)],
                         }
                     )
@@ -393,7 +409,7 @@ class DriverRuntime:
                     self.model_messages.append(
                         {
                             "role": "assistant",
-                            "content": None,
+                            "content": e.content,
                             "tool_calls": [_tc_wire(c) for c in e.calls],
                         }
                     )
