@@ -204,15 +204,35 @@ def _spawn_background(config_path: Path, home: Path) -> int:
     log_dir = home / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "service.log"
-    mode = "wb" if log_path.exists() and log_path.stat().st_size > MAX_SERVICE_LOG_BYTES else "ab"
-    log = open(log_path, mode, buffering=0)  # noqa: SIM115 - child owns inherited handle
+    truncate_log = log_path.exists() and log_path.stat().st_size > MAX_SERVICE_LOG_BYTES
     command = [_pythonw_executable(), "-m", "xenolect.service", "--config", str(config_path)]
+    env = os.environ.copy()
+
+    if _platform_family() == "macos" and hasattr(os, "posix_spawn"):
+        # Avoid child-side Python setup between fork and exec on macOS.
+        log_flags = os.O_WRONLY | os.O_CREAT | (os.O_TRUNC if truncate_log else os.O_APPEND)
+        file_actions = [
+            (os.POSIX_SPAWN_OPEN, 0, os.devnull, os.O_RDONLY, 0o600),
+            (os.POSIX_SPAWN_OPEN, 1, str(log_path), log_flags, 0o600),
+            (os.POSIX_SPAWN_DUP2, 1, 2),
+        ]
+        try:
+            pid = os.posix_spawn(
+                command[0], command, env, file_actions=file_actions, setsid=True
+            )
+        except (NotImplementedError, OSError) as exc:
+            raise ServiceError(f"could not start Xenolect background service: {exc}") from exc
+        _atomic_write(service_pid_path(home), str(pid) + "\n")
+        return pid
+
+    mode = "wb" if truncate_log else "ab"
+    log = open(log_path, mode, buffering=0)  # noqa: SIM115 - child owns inherited handle
     kwargs: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
         "stdout": log,
         "stderr": log,
         "close_fds": True,
-        "env": os.environ.copy(),
+        "env": env,
         "cwd": str(home),
     }
     if os.name == "nt":

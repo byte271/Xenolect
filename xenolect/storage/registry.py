@@ -321,7 +321,7 @@ class DriverRegistry:
     def write_report(self, binding: InstalledDriver, payload: dict[str, Any]) -> Path:
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-        path = self.reports_dir / f"{binding.binding_id}-{stamp}.json"
+        path = self.reports_dir / f"{binding.binding_id}-{stamp}-{uuid.uuid4().hex[:12]}.json"
         _atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
         # Reports are diagnostics, not product state. Keep them bounded so repeated
