@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+
+import pytest
 
 from xenolect import __version__
 from xenolect.service import (
@@ -134,6 +137,7 @@ def test_macos_launchagent_registration(tmp_path: Path, monkeypatch) -> None:
     assert service.is_autostart_registered(xhome) is False
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Linux autostart path semantics require POSIX")
 def test_linux_systemd_user_registration(tmp_path: Path, monkeypatch) -> None:
     import xenolect.service as service
 
@@ -160,6 +164,7 @@ def test_linux_systemd_user_registration(tmp_path: Path, monkeypatch) -> None:
     assert service.is_autostart_registered(xhome) is False
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Linux autostart path semantics require POSIX")
 def test_linux_desktop_autostart_fallback(tmp_path: Path, monkeypatch) -> None:
     import xenolect.service as service
 
