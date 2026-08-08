@@ -25,6 +25,8 @@ First alpha release of Xenolect's local model compatibility layer.
 
 - Hard 12-generation and 300-second default setup budgets.
 - Safe background-service upgrade/restart behavior.
+- macOS immediate background startup uses the native POSIX spawn path to avoid fragile child-side fork setup.
+- Diagnostic report filenames include a unique suffix so rapid writes cannot collide on platforms with coarse timestamp behavior.
 - Loopback-only proxy binding and loopback proxy bypass for local health/upstream traffic.
 - Restricted browser CORS, JSON request enforcement, bounded request bodies, logs, and reports.
 - Connection reuse and thread-safe registry hot refresh.
