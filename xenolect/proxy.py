@@ -377,14 +377,24 @@ class ProxyService:
     def __init__(self, target: ProxyTarget, *, client: OpenAICompatClient | None = None) -> None:
         self.target = target
         self.driver = target.driver
-        self.client = client or OpenAICompatClient(
-            base_url=target.base_url,
-            api_key=target.api_key,
-            model=target.model,
-            timeout=target.timeout,
-            temperature=None,
-            max_retries=1,
-        )
+        self._client = client
+        self._client_lock = threading.Lock()
+
+    def _client_for_request(self) -> OpenAICompatClient:
+        client = self._client
+        if client is not None:
+            return client
+        with self._client_lock:
+            if self._client is None:
+                self._client = OpenAICompatClient(
+                    base_url=self.target.base_url,
+                    api_key=self.target.api_key,
+                    model=self.target.model,
+                    timeout=self.target.timeout,
+                    temperature=None,
+                    max_retries=1,
+                )
+            return self._client
 
     def health(self) -> dict[str, Any]:
         return {
@@ -418,16 +428,18 @@ class ProxyService:
             )
         messages, tools, kwargs = translate_request(body, self.driver, self.target.model)
         try:
-            raw = self.client.chat_completions(messages, tools=tools, **kwargs)
+            raw = self._client_for_request().chat_completions(messages, tools=tools, **kwargs)
         except ClientError as exc:
             status = exc.status_code if exc.status_code and 400 <= exc.status_code <= 599 else 502
             raise ProxyError(str(exc), status=status, code=f"upstream_{exc.domain.value}") from exc
         return translate_response(raw, self.driver, self.target.model)
 
     def close(self) -> None:
-        close = getattr(self.client, "close", None)
-        if callable(close):
-            close()
+        with self._client_lock:
+            client = self._client
+            self._client = None
+        if client is not None:
+            client.close()
 
 
 
