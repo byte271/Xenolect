@@ -26,6 +26,7 @@ First alpha release of Xenolect's local model compatibility layer.
 - Hard 12-generation and 300-second default setup budgets.
 - Safe background-service upgrade/restart behavior.
 - macOS immediate background startup uses the native POSIX spawn path to avoid fragile child-side fork setup.
+- The loopback HTTP server bypasses hostname and reverse-DNS lookup during bind, preventing macOS mDNS stalls on `127.0.0.1`.
 - Background readiness and model listing do not initialize upstream HTTP clients; connection pools are created lazily on the first real chat request.
 - Diagnostic report filenames include a unique suffix so rapid writes cannot collide on platforms with coarse timestamp behavior.
 - Loopback-only proxy binding and loopback proxy bypass for local health/upstream traffic.
