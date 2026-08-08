@@ -23,16 +23,16 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from xenolect.xpt.syndrome import Syndrome, build_syndrome, sha
 from xenolect.abi.events import ToolDef, ToolResult
 from xenolect.driver.encode import (
-    build_system_tool_preamble,
+    build_tool_preamble_messages,
     encode_tool_result_message,
     should_send_native_tools,
     tools_for_request,
 )
 from xenolect.driver.ir import Driver
 from xenolect.endpoints.errors import ClientError, FailureDomain
+from xenolect.xpt.syndrome import Syndrome, build_syndrome, sha
 
 
 class BudgetExhausted(RuntimeError):
@@ -213,13 +213,19 @@ class Branch:
     def add_user(self, content: str, tools: list[ToolDef] | None = None) -> None:
         if tools:
             self.tools = list(tools)
-        preamble = build_system_tool_preamble(self.tools, self.driver)
-        if preamble and not any(
-            m.get("role") == "system" and m.get("_xenolect_preamble") for m in self.model_messages
+        preambles = build_tool_preamble_messages(self.tools, self.driver)
+        if preambles and not any(
+            m.get("_xenolect_preamble") for m in self.model_messages
         ):
-            self.model_messages.insert(
-                0, {"role": "system", "content": preamble, "_xenolect_preamble": True}
-            )
+            for index, preamble in reversed(list(enumerate(preambles))):
+                self.model_messages.insert(
+                    0,
+                    {
+                        **preamble,
+                        "_xenolect_preamble": True,
+                        "_xenolect_preamble_index": index,
+                    },
+                )
         self.model_messages.append({"role": "user", "content": content})
 
     def add_assistant_raw(self, raw: dict[str, Any]) -> None:

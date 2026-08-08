@@ -20,7 +20,9 @@ from xenolect.driver.ir import (
     ParserKind,
     SchemaTransform,
     ToolEncoding,
+    ToolResultEncoding,
     canonical_schema_transforms,
+    composed_driver,
 )
 from xenolect.eval.schema import validate_tool_arguments
 from xenolect.xpt.gauntlet import (
@@ -53,9 +55,10 @@ class RequestConfig:
         return f"{self.tool_encoding}[{'+'.join(self.transforms) or '-'}]"
 
     def driver(self, parser: str | None = None) -> Driver:
-        return Driver(
+        return composed_driver(
             tool_encoding=ToolEncoding(self.tool_encoding),
             parser=ParserKind(parser or self.tool_encoding),
+            tool_result_encoding=ToolResultEncoding.TOOL_ROLE,
             schema_transforms=[SchemaTransform(t) for t in self.transforms],
         )
 

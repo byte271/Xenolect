@@ -39,11 +39,15 @@ class AssistantText(BaseModel):
 class AssistantToolCall(BaseModel):
     type: Literal["assistant_tool_call"] = "assistant_tool_call"
     call: ToolCall
+    # Some model protocols put explanatory text beside a tool call.  Keeping it
+    # on the same assistant event preserves the Tool ABI state transition.
+    content: str | None = None
 
 
 class ToolCallBatch(BaseModel):
     type: Literal["tool_call_batch"] = "tool_call_batch"
     calls: list[ToolCall]
+    content: str | None = None
 
     def model_post_init(self, __context: Any) -> None:
         if not self.calls:

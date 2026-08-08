@@ -21,6 +21,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from xenolect.driver.ir import (
+    Driver,
+    ParserKind,
+    SchemaTransform,
+    ToolEncoding,
+    ToolResultEncoding,
+    composed_driver,
+)
+from xenolect.driver.termination import Termination
 from xenolect.xpt.certify import certify
 from xenolect.xpt.frontier import (
     CERTIFICATION_GENERATION_UPPER_BOUND,
@@ -58,8 +67,6 @@ from xenolect.xpt.session import (
     XptSession,
 )
 from xenolect.xpt.syndrome import ParseConsensus, Syndrome
-from xenolect.driver.ir import Driver, ParserKind, SchemaTransform, ToolEncoding, ToolResultEncoding
-from xenolect.driver.termination import Termination
 
 CERTIFIED = "CERTIFIED"
 UNSUPPORTED = "UNSUPPORTED"
@@ -121,7 +128,7 @@ class _Trajectory:
 def _driver_from(
     config: RequestConfig, parser: ParserKind, result_encoding: ToolResultEncoding
 ) -> Driver:
-    return Driver(
+    return composed_driver(
         tool_encoding=ToolEncoding(config.tool_encoding),
         parser=parser,
         schema_transforms=[SchemaTransform(t) for t in config.transforms],

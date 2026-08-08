@@ -15,7 +15,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from xenolect.abi.events import AssistantText, AssistantToolCall, Event, ToolCall, ToolCallBatch
-from xenolect.driver.ir import Driver, ParserKind
+from xenolect.driver.ir import (
+    Driver,
+    FramedJsonToolCallsParser,
+    NativeToolCallsParser,
+    ToolCallFields,
+    effective_protocol,
+)
 
 
 @dataclass
@@ -39,16 +45,90 @@ def parse_model_response_full(raw: dict[str, Any], driver: Driver) -> ParseResul
     if message is None:
         return ParseResult(events=[AssistantText(content=str(raw))], raw_message=None)
 
-    if driver.parser == ParserKind.NATIVE:
-        return _parse_native(message)
-    if driver.parser == ParserKind.TAGGED_JSON:
-        return _parse_tagged_json(message)
-    if driver.parser == ParserKind.XML_JSON:
-        return _parse_xml_json(message)
+    matches: list[tuple[list[ToolCall], str | None]] = []
+    errors: list[str] = []
+    for primitive in effective_protocol(driver).response:
+        if isinstance(primitive, NativeToolCallsParser):
+            if not message.get("tool_calls"):
+                continue
+            parsed = _parse_native(message)
+            if parsed.errors:
+                errors.extend(parsed.errors)
+            else:
+                matches.append(
+                    (_calls_from_events(parsed.events), _content_from_call_events(parsed.events))
+                )
+            continue
+        if isinstance(primitive, FramedJsonToolCallsParser):
+            parsed, matched, surrounding = _parse_framed_primitive(message, primitive)
+            if parsed.errors:
+                errors.extend(parsed.errors)
+            elif matched:
+                matches.append((_calls_from_events(parsed.events), surrounding))
+            continue
+        # Pydantic's discriminated union prevents this unless validation was
+        # bypassed with model_copy/construct.
+        errors.append(f"unsupported response primitive: {type(primitive).__name__}")
+
+    if errors:
+        return ParseResult(events=[], errors=errors, raw_message=message)
+    if matches:
+        signatures = {
+            json.dumps(
+                [call.model_dump(mode="json") for call in calls],
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for calls, _ in matches
+        }
+        if len(signatures) != 1:
+            return ParseResult(
+                events=[],
+                errors=[
+                    "configured response primitives parsed different canonical tool calls; "
+                    "refusing ambiguous output"
+                ],
+                raw_message=message,
+            )
+        calls = matches[0][0]
+        surrounding = next((text for _, text in matches if text), None)
+        return ParseResult(
+            events=_events_for_calls(calls, content=surrounding),
+            raw_message=message,
+        )
+
+    content = message.get("content")
     return ParseResult(
-        events=[AssistantText(content=str(message.get("content") or ""))],
+        events=[
+            AssistantText(
+                content=content if isinstance(content, str) else json.dumps(content)
+            )
+        ],
         raw_message=message,
     )
+
+
+def _calls_from_events(events: list[Event]) -> list[ToolCall]:
+    calls: list[ToolCall] = []
+    for event in events:
+        if isinstance(event, AssistantToolCall):
+            calls.append(event.call)
+        elif isinstance(event, ToolCallBatch):
+            calls.extend(event.calls)
+    return calls
+
+
+def _content_from_call_events(events: list[Event]) -> str | None:
+    for event in events:
+        if isinstance(event, (AssistantToolCall, ToolCallBatch)) and event.content:
+            return event.content
+    return None
+
+
+def _events_for_calls(calls: list[ToolCall], *, content: str | None = None) -> list[Event]:
+    if len(calls) == 1:
+        return [AssistantToolCall(call=calls[0], content=content)]
+    return [ToolCallBatch(calls=calls, content=content)]
 
 
 def strict_json_loads(s: str) -> Any:
@@ -154,11 +234,16 @@ def _parse_native(message: dict[str, Any]) -> ParseResult:
                 errors=["native tool_calls present but none parseable"],
                 raw_message=message,
             )
+        assistant_content = content if isinstance(content, str) and content else None
         if len(calls) == 1:
             return ParseResult(
-                events=[AssistantToolCall(call=calls[0])], raw_message=message
+                events=[AssistantToolCall(call=calls[0], content=assistant_content)],
+                raw_message=message,
             )
-        return ParseResult(events=[ToolCallBatch(calls=calls)], raw_message=message)
+        return ParseResult(
+            events=[ToolCallBatch(calls=calls, content=assistant_content)],
+            raw_message=message,
+        )
 
     return ParseResult(
         events=[
@@ -170,15 +255,21 @@ def _parse_native(message: dict[str, Any]) -> ParseResult:
     )
 
 
-def _parse_object_to_call(obj: Any, *, context: str) -> tuple[ToolCall | None, str | None]:
+def _parse_object_to_call(
+    obj: Any,
+    *,
+    context: str,
+    fields: ToolCallFields | None = None,
+) -> tuple[ToolCall | None, str | None]:
+    fields = fields or ToolCallFields()
     if not isinstance(obj, dict):
         return None, f"{context}: tool payload is not an object"
-    if "name" not in obj:
-        return None, f"{context}: missing name"
-    name = obj.get("name")
+    if fields.name not in obj:
+        return None, f"{context}: missing {fields.name}"
+    name = obj.get(fields.name)
     if not isinstance(name, str) or not name.strip():
         return None, f"{context}: missing or empty tool name"
-    args = obj.get("arguments", {})
+    args = obj.get(fields.arguments, {})
     if isinstance(args, str):
         parsed, err = _parse_args_strict(args)
         if err:
@@ -189,175 +280,187 @@ def _parse_object_to_call(obj: Any, *, context: str) -> tuple[ToolCall | None, s
     # Preserve empty list arguments; only default when arguments is missing/None.
     if args is None:
         args = {}
-    return (
-        ToolCall(id=obj.get("id"), name=name, arguments=args),
-        None,
-    )
+    call_id = obj.get(fields.call_id) if fields.call_id is not None else None
+    if call_id is not None and not isinstance(call_id, str):
+        return None, f"{context}: call id must be a string"
+    return ToolCall(id=call_id, name=name, arguments=args), None
 
 
-def _parse_tagged_json(message: dict[str, Any]) -> ParseResult:
-    if message.get("tool_calls"):
-        return _parse_native(message)
+def _find_frame_token(
+    text: str,
+    token: str,
+    start: int,
+    *,
+    case_sensitive: bool,
+    flexible_whitespace: bool,
+) -> tuple[int, int] | None:
+    if not flexible_whitespace:
+        if case_sensitive:
+            position = text.find(token, start)
+        else:
+            match = re.search(re.escape(token), text[start:], flags=re.IGNORECASE)
+            position = -1 if match is None else start + match.start()
+        if position < 0:
+            return None
+        return position, position + len(token)
+
+    parts = re.split(r"(\s+)", token)
+    pattern = "".join(r"\s*" if part.isspace() else re.escape(part) for part in parts)
+    flags = 0 if case_sensitive else re.IGNORECASE
+    match = re.search(pattern, text[start:], flags=flags)
+    if match is None:
+        return None
+    return start + match.start(), start + match.end()
+
+
+def _parse_framed_primitive(
+    message: dict[str, Any],
+    primitive: FramedJsonToolCallsParser,
+) -> tuple[ParseResult, bool, str | None]:
+    """Return (result, whether this primitive matched, surrounding text)."""
     content = message.get("content") or ""
     if not isinstance(content, str):
         content = json.dumps(content)
 
-    errors: list[str] = []
-    calls: list[ToolCall] = []
-    # Find TOOL_CALL markers and extract balanced JSON
-    idx = 0
-    marker = "TOOL_CALL"
-    found_marker = False
-    while True:
-        pos = content.find(marker, idx)
-        if pos < 0:
-            break
-        found_marker = True
-        j = pos + len(marker)
-        while j < len(content) and content[j].isspace():
-            j += 1
-        if j >= len(content) or content[j] != "{":
-            errors.append("TOOL_CALL marker without JSON object")
-            idx = j
-            continue
-        blob, end, err = extract_balanced_json(content, j)
-        if err or blob is None:
-            errors.append(f"TOOL_CALL framing error: {err}")
-            break
-        try:
-            obj = strict_json_loads(blob)
-        except json.JSONDecodeError as exc:
-            errors.append(f"TOOL_CALL payload JSON error: {exc.msg}")
-            idx = end
-            continue
-        call, cerr = _parse_object_to_call(obj, context="TOOL_CALL")
-        if cerr:
-            errors.append(cerr)
-        elif call:
-            calls.append(call)
-        idx = end
-
-    if found_marker:
-        if errors:
-            return ParseResult(events=[], errors=errors, raw_message=message)
-        if not calls:
-            return ParseResult(
-                events=[],
-                errors=["TOOL_CALL markers produced no calls"],
-                raw_message=message,
-            )
-        if len(calls) == 1:
-            return ParseResult(
-                events=[AssistantToolCall(call=calls[0])], raw_message=message
-            )
-        return ParseResult(events=[ToolCallBatch(calls=calls)], raw_message=message)
-
-    # Whole-content JSON object — only when it is clearly a tool frame
-    # (`arguments` present), not arbitrary prose JSON that happens to contain
-    # a "name" key.
-    stripped = content.strip()
-    if stripped.startswith("{") and '"name"' in stripped and '"arguments"' in stripped:
+    if primitive.whole_content:
+        stripped = content.strip()
+        if not stripped.startswith("{"):
+            return ParseResult(raw_message=message), False, None
         try:
             obj = strict_json_loads(stripped)
-            if not isinstance(obj, dict) or "arguments" not in obj:
-                return ParseResult(
-                    events=[AssistantText(content=content)], raw_message=message
-                )
-            call, cerr = _parse_object_to_call(obj, context="content-json")
-            if cerr:
-                return ParseResult(events=[], errors=[cerr], raw_message=message)
-            assert call is not None
-            return ParseResult(
-                events=[AssistantToolCall(call=call)], raw_message=message
-            )
         except json.JSONDecodeError:
-            return ParseResult(
-                events=[AssistantText(content=content)],
-                errors=[],  # plain text, not a tool frame
-                raw_message=message,
-            )
+            # A whole-content parser is an alternative, so arbitrary malformed
+            # prose beginning with "{" is not automatically claimed as a frame.
+            return ParseResult(raw_message=message), False, None
+        if not isinstance(obj, dict) or primitive.fields.arguments not in obj:
+            return ParseResult(raw_message=message), False, None
+        call, error = _parse_object_to_call(
+            obj,
+            context="whole-content JSON tool call",
+            fields=primitive.fields,
+        )
+        if error:
+            return ParseResult(errors=[error], raw_message=message), True, None
+        assert call is not None
+        return ParseResult(events=_events_for_calls([call]), raw_message=message), True, None
 
-    return ParseResult(events=[AssistantText(content=content)], raw_message=message)
-
-
-_XML_OPEN = re.compile(r"<tool_call\s*>", re.IGNORECASE)
-_XML_CLOSE = re.compile(r"</tool_call\s*>", re.IGNORECASE)
-
-
-def _parse_xml_json(message: dict[str, Any]) -> ParseResult:
-    if message.get("tool_calls"):
-        return _parse_native(message)
-    content = message.get("content") or ""
-    if not isinstance(content, str):
-        content = json.dumps(content)
-
-    errors: list[str] = []
-    calls: list[ToolCall] = []
+    frame = primitive.frame
     idx = 0
-    found = False
+    calls: list[ToolCall] = []
+    consumed: list[tuple[int, int]] = []
     while True:
-        m = _XML_OPEN.search(content, idx)
-        if not m:
+        prefix_match = _find_frame_token(
+            content,
+            frame.prefix,
+            idx,
+            case_sensitive=frame.case_sensitive,
+            flexible_whitespace=frame.flexible_whitespace,
+        )
+        if prefix_match is None:
             break
-        found = True
-        start_body = m.end()
-        # skip whitespace
-        j = start_body
-        while j < len(content) and content[j].isspace():
-            j += 1
-        if j >= len(content) or content[j] != "{":
-            # empty or non-json payload
-            close = _XML_CLOSE.search(content, start_body)
-            if close is None:
-                errors.append("unclosed <tool_call> with empty/non-json payload")
-                break
-            payload = content[start_body : close.start()].strip()
-            if not payload:
-                errors.append("empty <tool_call> payload")
-            else:
-                errors.append("non-object <tool_call> payload")
-            idx = close.end()
-            continue
-        blob, end, err = extract_balanced_json(content, j)
-        if err or blob is None:
-            errors.append(f"<tool_call> framing error: {err}")
-            break
+        pos, body_start = prefix_match
+        if calls and not primitive.multiple:
+            return (
+                ParseResult(
+                    errors=["response primitive permits only one framed JSON tool call"],
+                    raw_message=message,
+                ),
+                True,
+                None,
+            )
+        json_start = body_start
+        if frame.whitespace_after_prefix:
+            while json_start < len(content) and content[json_start].isspace():
+                json_start += 1
+        if json_start >= len(content) or content[json_start] != "{":
+            return (
+                ParseResult(
+                    errors=[
+                        f"frame {frame.prefix!r} is not followed by a JSON object"
+                    ],
+                    raw_message=message,
+                ),
+                True,
+                None,
+            )
+        blob, json_end, framing_error = extract_balanced_json(content, json_start)
+        if framing_error or blob is None:
+            return (
+                ParseResult(
+                    errors=[f"framed JSON tool call error: {framing_error}"],
+                    raw_message=message,
+                ),
+                True,
+                None,
+            )
         try:
             obj = strict_json_loads(blob)
         except json.JSONDecodeError as exc:
-            errors.append(f"<tool_call> payload JSON error: {exc.msg}")
-            # still try to find closing tag
-            close = _XML_CLOSE.search(content, end)
-            idx = close.end() if close else end
-            continue
-        call, cerr = _parse_object_to_call(obj, context="<tool_call>")
-        if cerr:
-            errors.append(cerr)
-        elif call:
-            calls.append(call)
-        close = _XML_CLOSE.search(content, end)
-        if close is None:
-            errors.append("unclosed <tool_call> after JSON payload")
-            break
-        # Only whitespace may appear between the JSON payload and the closing tag.
-        trailing = content[end:close.start()]
-        if trailing.strip():
-            errors.append("unexpected content before </tool_call>")
-        idx = close.end()
-
-    if found:
-        if errors:
-            return ParseResult(events=[], errors=errors, raw_message=message)
-        if not calls:
-            return ParseResult(
-                events=[],
-                errors=["<tool_call> markers produced no calls"],
-                raw_message=message,
+            return (
+                ParseResult(
+                    errors=[f"framed tool payload JSON error: {exc.msg}"],
+                    raw_message=message,
+                ),
+                True,
+                None,
             )
-        if len(calls) == 1:
-            return ParseResult(
-                events=[AssistantToolCall(call=calls[0])], raw_message=message
-            )
-        return ParseResult(events=[ToolCallBatch(calls=calls)], raw_message=message)
+        call, error = _parse_object_to_call(
+            obj,
+            context=f"frame {frame.prefix!r}",
+            fields=primitive.fields,
+        )
+        if error:
+            return ParseResult(errors=[error], raw_message=message), True, None
+        assert call is not None
 
-    return ParseResult(events=[AssistantText(content=content)], raw_message=message)
+        frame_end = json_end
+        if frame.suffix:
+            suffix_match = _find_frame_token(
+                content,
+                frame.suffix,
+                json_end,
+                case_sensitive=frame.case_sensitive,
+                flexible_whitespace=frame.flexible_whitespace,
+            )
+            if suffix_match is None:
+                return (
+                    ParseResult(
+                        errors=[f"unclosed frame {frame.prefix!r}; missing {frame.suffix!r}"],
+                        raw_message=message,
+                    ),
+                    True,
+                    None,
+                )
+            suffix_pos, suffix_end = suffix_match
+            if content[json_end:suffix_pos].strip():
+                return (
+                    ParseResult(
+                        errors=[f"unexpected content before closing frame {frame.suffix!r}"],
+                        raw_message=message,
+                    ),
+                    True,
+                    None,
+                )
+            frame_end = suffix_end
+        calls.append(call)
+        consumed.append((pos, frame_end))
+        idx = frame_end
+
+    if not calls:
+        return ParseResult(raw_message=message), False, None
+
+    surrounding: str | None = None
+    if primitive.capture_surrounding_text:
+        pieces: list[str] = []
+        cursor = 0
+        for start, end in consumed:
+            pieces.append(content[cursor:start])
+            cursor = end
+        pieces.append(content[cursor:])
+        retained = "".join(pieces).strip()
+        surrounding = retained or None
+    return (
+        ParseResult(events=_events_for_calls(calls, content=surrounding), raw_message=message),
+        True,
+        surrounding,
+    )

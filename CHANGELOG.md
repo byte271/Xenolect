@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Driver protocol IR
+
+- Added a backward-compatible Driver IR v0.2 protocol program composed from typed request, response, tool-result, and state primitives.
+- Replaced hardcoded tagged/XML execution branches with parameterized strict JSON framing and field mapping.
+- Added multiple-parser agreement checks and optional preservation of assistant text beside tool calls.
+- XPT now emits composed v0.2 Drivers while retaining the proven 144-program bounded online frontier, 12-generation budget, fresh certification, and 300-second default deadline.
+- Existing v0.1 Driver serialization and content hashes remain stable; unknown or incomplete v0.2 programs fail closed.
+
 ## 0.1.0
 
 First alpha release of Xenolect's local model compatibility layer.
