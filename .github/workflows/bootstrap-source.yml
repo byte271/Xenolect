@@ -1,0 +1,37 @@
+name: Bootstrap source tree
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/bootstrap-source.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  expand:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct verified source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .xenolect-bootstrap/part-*.b64 | base64 -d > /tmp/xenolect-source.zip
+          unzip -t /tmp/xenolect-source.zip
+          unzip -o /tmp/xenolect-source.zip
+          rm -rf .xenolect-bootstrap
+          rm -f .github/workflows/bootstrap-source.yml
+
+      - name: Publish source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "Publish Xenolect v0.1.0 source"
+          git push origin HEAD:main
