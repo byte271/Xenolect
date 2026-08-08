@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
-from click import unstyle
 from typer.testing import CliRunner
 
 from xenolect import __version__
 from xenolect.cli.main import app
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _plain(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 def test_release_version_is_consistent() -> None:
@@ -18,7 +25,7 @@ def test_release_version_is_consistent() -> None:
 def test_normal_cli_surface_does_not_expose_internal_commands() -> None:
     result = CliRunner().invoke(app, ["--help"])
     assert result.exit_code == 0
-    output = unstyle(result.stdout)
+    output = _plain(result.stdout)
     for command in ("install", "kill", "ban", "status", "version"):
         assert command in output
     for internal in ("serve", "xpt", "compile", "eval", "mock", "gate"):
@@ -28,7 +35,7 @@ def test_normal_cli_surface_does_not_expose_internal_commands() -> None:
 def test_install_help_only_exposes_user_option() -> None:
     result = CliRunner().invoke(app, ["install", "--help"])
     assert result.exit_code == 0
-    output = unstyle(result.stdout)
+    output = _plain(result.stdout)
     assert "--verbose" in output
     for internal in ("--base-url", "--model", "--api-key", "--deadline", "--max-generations", "--force"):
         assert internal not in output
