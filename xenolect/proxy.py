@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from typing import Any, Iterable
 from urllib.parse import urlsplit
 
@@ -37,6 +38,19 @@ from xenolect.driver.parse import parse_model_response_full, strict_json_loads
 from xenolect.endpoints.errors import ClientError
 from xenolect.endpoints.http import OpenAICompatClient
 from xenolect.storage.registry import DriverRegistry, InstalledDriver, RegistryError
+
+
+class _LoopbackHTTPServer(ThreadingHTTPServer):
+    """HTTP server that never performs hostname/reverse-DNS lookup on bind."""
+
+    def server_bind(self) -> None:
+        # HTTPServer.server_bind() calls socket.getfqdn(host). On macOS this can
+        # block for many seconds in mDNS even for 127.0.0.1. Xenolect is a
+        # loopback-only service and never needs a DNS-derived server name.
+        TCPServer.server_bind(self)
+        host, port = self.socket.getsockname()[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
 
 
 class ProxyError(RuntimeError):
@@ -783,7 +797,7 @@ def make_handler(service: ProxyService) -> type[BaseHTTPRequestHandler]:
 
 def serve(service: ProxyService, *, host: str = "127.0.0.1", port: int = 8179) -> None:
     """Run the blocking local proxy server until interrupted."""
-    server = ThreadingHTTPServer((host, port), make_handler(service))
+    server = _LoopbackHTTPServer((host, port), make_handler(service))
     try:
         server.serve_forever()
     finally:
