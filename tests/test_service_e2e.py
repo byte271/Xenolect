@@ -60,11 +60,20 @@ def test_real_background_process_models_chat_and_kill(tmp_path: Path, monkeypatc
         driver=identity_driver(),
     )
 
-    state = ensure_background_service(
-        home=xhome,
-        preferred_port=19179,
-        enable_autostart=False,
-    )
+    try:
+        state = ensure_background_service(
+            home=xhome,
+            preferred_port=19179,
+            enable_autostart=False,
+        )
+    except Exception:
+        log_path = xhome / "logs" / "service.log"
+        if log_path.is_file():
+            print("\n--- Xenolect child service.log ---")
+            print(log_path.read_text(encoding="utf-8", errors="replace"))
+            print("--- end service.log ---\n")
+        raise
+
     try:
         with urllib.request.urlopen(state.base_url + "/models", timeout=3) as response:  # noqa: S310 - loopback
             models = json.loads(response.read())
