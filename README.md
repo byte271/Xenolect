@@ -218,3 +218,77 @@ Xenolect exposes a local loopback service and supports:
 - one completion choice (`n=1`)
 - `stream=true` as **buffered SSE compatibility streaming**
 - `stream_options.include_usage` when upstream usage data is available
+
+Buffered streaming means Xenolect first receives the complete upstream completion, then emits valid SSE chunks. **v0.1.0 does not provide token-by-token upstream streaming latency.**
+
+The following are **not** claimed by v0.1.0:
+
+- arbitrary state-machine Driver synthesis outside the 144-program v0.1.0 grammar
+- creation of application tools or tool implementations
+- `/v1/responses`
+- embeddings
+- audio or image APIs
+- legacy `functions` / `function_call`
+- multiple completion choices (`n>1`)
+- complete behavioral compatibility for every optional OpenAI request field
+- a full OpenAI API replacement
+
+Fields outside the verified tool-calling path may be forwarded to the upstream server on a best-effort basis. Unsupported behavior fails explicitly rather than being silently invented.
+
+## Local security model
+
+The background service binds to a loopback address only. It is not intended to be exposed on a LAN or the public internet. Any process running as your local user can still connect to a loopback service; v0.1.0 does not provide local client authentication.
+
+Browser cross-origin access is restricted to loopback origins. Chat requests require JSON content type. Xenolect does not store upstream API keys in its Driver registry.
+
+Credentialed remote upstreams are not a first-class persistent setup in v0.1.0; the release is primarily intended for local model servers.
+
+## Local data
+
+Xenolect stores its local state under:
+
+```text
+~/.xenolect
+```
+
+This includes the model registry, verified Driver artifacts, service configuration, and bounded diagnostic reports/logs.
+
+## Platform notes
+
+### Windows
+
+Login startup uses the current user's Startup folder. No administrator rights are required.
+
+### macOS
+
+Login startup uses a per-user LaunchAgent. No root privileges are required. If macOS removes or blocks the Python environment that installed Xenolect, reinstall Xenolect with a persistent Python installation and run `xenolect install` again.
+
+### Linux
+
+On systemd-based systems, Xenolect registers a user service for login startup. On non-systemd desktop sessions it writes a freedesktop autostart entry instead. No root privileges are required. Very minimal/headless non-systemd environments may not provide a standard per-user login-start facility; Xenolect still runs immediately after `install`, and `status --verbose` reports whether autostart was actually registered.
+
+## Troubleshooting
+
+**No model found**  
+Start your model server, run `xenolect install` again, then enter its port or OpenAI-style base URL if automatic scanning does not find it.
+
+**A model was banned**  
+Run `xenolect ban` and select the banned model to restore it.
+
+**Xenolect is not running**  
+Run `xenolect install`. A cached model should start quickly without repeating compatibility preparation unless the observable model descriptor changed.
+
+**Login startup is not enabled**  
+The Driver and current service can still be valid. Run `xenolect status --verbose` to see the service state, then run `xenolect install` again after fixing permissions or the Python installation if needed.
+
+**Need technical details**  
+Use:
+
+```text
+xenolect install --verbose
+xenolect status --verbose
+```
+
+## License
+
+Apache License 2.0. See `LICENSE`.

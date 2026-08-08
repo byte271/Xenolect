@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+
+# Local environments
+.venv/
+venv/
+
+# Local Xenolect state and generated artifacts
+.xenolect/
+*.mdriver
+*.report.json

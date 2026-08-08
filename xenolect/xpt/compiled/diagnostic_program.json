@@ -1,0 +1,301 @@
+{
+  "nodes": {
+    "n0001": {
+      "children": {
+        "calls:record_alpha,record_beta,record_gamma|valid:record_alpha,record_beta,record_gamma|exact:record_alpha,record_beta,record_gamma": "n0002",
+        "no_calls": "n0003"
+      },
+      "conclusion": null,
+      "n_hypotheses": 648,
+      "node_id": "n0001",
+      "probe_id": "G1@native[inline_refs+strip_titles]",
+      "reason": "minimax over 36 probe templates: G1@native[inline_refs+strip_titles] splits 648 hypotheses into 2 observation classes, worst undecided posterior 360; also advances the certification trajectory",
+      "unsupported": false
+    },
+    "n0002": {
+      "children": {},
+      "conclusion": "native[inline_refs+strip_titles]",
+      "n_hypotheses": 288,
+      "node_id": "n0002",
+      "probe_id": null,
+      "reason": "all 288 surviving hypotheses accept native[inline_refs+strip_titles]; no further probe can change the decision",
+      "unsupported": false
+    },
+    "n0003": {
+      "children": {
+        "calls:record_alpha,record_beta,record_gamma|valid:record_alpha,record_beta,record_gamma|exact:record_alpha,record_beta,record_gamma": "n0004",
+        "no_calls": "n0005"
+      },
+      "conclusion": null,
+      "n_hypotheses": 360,
+      "node_id": "n0003",
+      "probe_id": "G1@native[inline_refs+strip_titles+force_additional_properties_false]",
+      "reason": "minimax over 36 probe templates: G1@native[inline_refs+strip_titles+force_additional_properties_false] splits 360 hypotheses into 2 observation classes, worst undecided posterior 216; also advances the certification trajectory",
+      "unsupported": false
+    },
+    "n0004": {
+      "children": {},
+      "conclusion": "native[inline_refs+strip_titles+force_additional_properties_false]",
+      "n_hypotheses": 144,
+      "node_id": "n0004",
+      "probe_id": null,
+      "reason": "all 144 surviving hypotheses accept native[inline_refs+strip_titles+force_additional_properties_false]; no further probe can change the decision",
+      "unsupported": false
+    },
+    "n0005": {
+      "children": {
+        "calls:record_alpha,record_beta,record_gamma|valid:record_alpha,record_beta,record_gamma|exact:record_alpha,record_beta,record_gamma": "n0006",
+        "no_calls": "n0007"
+      },
+      "conclusion": null,
+      "n_hypotheses": 216,
+      "node_id": "n0005",
+      "probe_id": "G1@tagged_json[inline_refs+strip_titles]",
+      "reason": "minimax over 36 probe templates: G1@tagged_json[inline_refs+strip_titles] splits 216 hypotheses into 2 observation classes, worst undecided posterior 120; also advances the certification trajectory",
+      "unsupported": false
+    },
+    "n0006": {
+      "children": {},
+      "conclusion": "tagged_json[inline_refs+strip_titles]",
+      "n_hypotheses": 96,
+      "node_id": "n0006",
+      "probe_id": null,
+      "reason": "all 96 surviving hypotheses accept tagged_json[inline_refs+strip_titles]; no further probe can change the decision",
+      "unsupported": false
+    },
+    "n0007": {
+      "children": {
+        "calls:record_alpha,record_beta,record_gamma|valid:record_alpha,record_beta,record_gamma|exact:record_alpha,record_beta,record_gamma": "n0008",
+        "no_calls": "n0009"
+      },
+      "conclusion": null,
+      "n_hypotheses": 120,
+      "node_id": "n0007",
+      "probe_id": "G1@xml_json[inline_refs+strip_titles+force_additional_properties_false]",
+      "reason": "minimax over 36 probe templates: G1@xml_json[inline_refs+strip_titles+force_additional_properties_false] splits 120 hypotheses into 2 observation classes, worst undecided posterior 48; also advances the certification trajectory",
+      "unsupported": false
+    },
+    "n0008": {
+      "children": {},
+      "conclusion": "xml_json[inline_refs+strip_titles+force_additional_properties_false]",
+      "n_hypotheses": 72,
+      "node_id": "n0008",
+      "probe_id": null,
+      "reason": "all 72 surviving hypotheses accept xml_json[inline_refs+strip_titles+force_additional_properties_false]; no further probe can change the decision",
+      "unsupported": false
+    },
+    "n0009": {
+      "children": {
+        "calls:record_alpha,record_beta,record_gamma|valid:record_alpha,record_beta,record_gamma|exact:record_alpha,record_beta,record_gamma": "n0010",
+        "no_calls": "n0011"
+      },
+      "conclusion": null,
+      "n_hypotheses": 48,
+      "node_id": "n0009",
+      "probe_id": "G1@xml_json[inline_refs+strip_titles]",
+      "reason": "minimax over 36 probe templates: G1@xml_json[inline_refs+strip_titles] splits 48 hypotheses into 2 observation classes, worst undecided posterior 0; also advances the certification trajectory",
+      "unsupported": false
+    },
+    "n0010": {
+      "children": {},
+      "conclusion": "xml_json[inline_refs+strip_titles]",
+      "n_hypotheses": 24,
+      "node_id": "n0010",
+      "probe_id": null,
+      "reason": "all 24 surviving hypotheses accept xml_json[inline_refs+strip_titles]; no further probe can change the decision",
+      "unsupported": false
+    },
+    "n0011": {
+      "children": {},
+      "conclusion": "tagged_json[inline_refs+strip_titles+force_additional_properties_false]",
+      "n_hypotheses": 24,
+      "node_id": "n0011",
+      "probe_id": null,
+      "reason": "all 24 surviving hypotheses accept tagged_json[inline_refs+strip_titles+force_additional_properties_false]; no further probe can change the decision",
+      "unsupported": false
+    }
+  },
+  "probes": {
+    "G1@native[-]": {
+      "config": "native[-]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@native[force_additional_properties_false]": {
+      "config": "native[force_additional_properties_false]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@native[inline_refs+force_additional_properties_false]": {
+      "config": "native[inline_refs+force_additional_properties_false]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@native[inline_refs+strip_titles+force_additional_properties_false]": {
+      "config": "native[inline_refs+strip_titles+force_additional_properties_false]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@native[inline_refs+strip_titles]": {
+      "config": "native[inline_refs+strip_titles]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@native[inline_refs]": {
+      "config": "native[inline_refs]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@native[strip_titles+force_additional_properties_false]": {
+      "config": "native[strip_titles+force_additional_properties_false]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@native[strip_titles]": {
+      "config": "native[strip_titles]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@tagged_json[-]": {
+      "config": "tagged_json[-]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@tagged_json[force_additional_properties_false]": {
+      "config": "tagged_json[force_additional_properties_false]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@tagged_json[inline_refs+force_additional_properties_false]": {
+      "config": "tagged_json[inline_refs+force_additional_properties_false]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@tagged_json[inline_refs+strip_titles+force_additional_properties_false]": {
+      "config": "tagged_json[inline_refs+strip_titles+force_additional_properties_false]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@tagged_json[inline_refs+strip_titles]": {
+      "config": "tagged_json[inline_refs+strip_titles]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@tagged_json[inline_refs]": {
+      "config": "tagged_json[inline_refs]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@tagged_json[strip_titles+force_additional_properties_false]": {
+      "config": "tagged_json[strip_titles+force_additional_properties_false]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@tagged_json[strip_titles]": {
+      "config": "tagged_json[strip_titles]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@xml_json[-]": {
+      "config": "xml_json[-]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@xml_json[force_additional_properties_false]": {
+      "config": "xml_json[force_additional_properties_false]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@xml_json[inline_refs+force_additional_properties_false]": {
+      "config": "xml_json[inline_refs+force_additional_properties_false]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@xml_json[inline_refs+strip_titles+force_additional_properties_false]": {
+      "config": "xml_json[inline_refs+strip_titles+force_additional_properties_false]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@xml_json[inline_refs+strip_titles]": {
+      "config": "xml_json[inline_refs+strip_titles]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@xml_json[inline_refs]": {
+      "config": "xml_json[inline_refs]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@xml_json[strip_titles+force_additional_properties_false]": {
+      "config": "xml_json[strip_titles+force_additional_properties_false]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "G1@xml_json[strip_titles]": {
+      "config": "xml_json[strip_titles]",
+      "kind": "gauntlet_turn1",
+      "progresses_trajectory": true
+    },
+    "slp_ap@native[-]": {
+      "config": "native[-]",
+      "kind": "slp_ap",
+      "progresses_trajectory": false
+    },
+    "slp_ap@tagged_json[-]": {
+      "config": "tagged_json[-]",
+      "kind": "slp_ap",
+      "progresses_trajectory": false
+    },
+    "slp_ap@xml_json[-]": {
+      "config": "xml_json[-]",
+      "kind": "slp_ap",
+      "progresses_trajectory": false
+    },
+    "slp_plain@native[-]": {
+      "config": "native[-]",
+      "kind": "slp_plain",
+      "progresses_trajectory": false
+    },
+    "slp_plain@tagged_json[-]": {
+      "config": "tagged_json[-]",
+      "kind": "slp_plain",
+      "progresses_trajectory": false
+    },
+    "slp_plain@xml_json[-]": {
+      "config": "xml_json[-]",
+      "kind": "slp_plain",
+      "progresses_trajectory": false
+    },
+    "slp_ref@native[-]": {
+      "config": "native[-]",
+      "kind": "slp_ref",
+      "progresses_trajectory": false
+    },
+    "slp_ref@tagged_json[-]": {
+      "config": "tagged_json[-]",
+      "kind": "slp_ref",
+      "progresses_trajectory": false
+    },
+    "slp_ref@xml_json[-]": {
+      "config": "xml_json[-]",
+      "kind": "slp_ref",
+      "progresses_trajectory": false
+    },
+    "slp_title@native[-]": {
+      "config": "native[-]",
+      "kind": "slp_title",
+      "progresses_trajectory": false
+    },
+    "slp_title@tagged_json[-]": {
+      "config": "tagged_json[-]",
+      "kind": "slp_title",
+      "progresses_trajectory": false
+    },
+    "slp_title@xml_json[-]": {
+      "config": "xml_json[-]",
+      "kind": "slp_title",
+      "progresses_trajectory": false
+    }
+  },
+  "root": "n0001"
+}
