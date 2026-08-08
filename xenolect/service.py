@@ -32,6 +32,7 @@ SERVICE_CONFIG_VERSION = 1
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8179
 MAX_SERVICE_LOG_BYTES = 1_000_000
+SERVICE_START_TIMEOUT_SECONDS = 20.0
 
 
 class ServiceError(RuntimeError):
@@ -657,7 +658,7 @@ def ensure_background_service(
     config_path = save_service_config(config, root)
     _spawn_background(config_path, root)
 
-    deadline = time.monotonic() + 6.0
+    deadline = time.monotonic() + SERVICE_START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if is_service_running(config, timeout=0.25):
             auto = register_autostart(root) if enable_autostart else False
