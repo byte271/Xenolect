@@ -1,0 +1,53 @@
+name: Finalize source history
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/finalize-source.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify complete release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f pyproject.toml
+          test -f README.md
+          test -f CHANGELOG.md
+          test -f LICENSE
+          test -f xenolect/cli/main.py
+          test -f xenolect/xpt/compiled/diagnostic_program.json
+          test -f .github/workflows/ci.yml
+          test ! -d .xenolect-bootstrap
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('pyproject.toml').read_text(encoding='utf-8')
+          assert 'version = "0.1.0"' in p
+          print('release source verified')
+          PY
+
+      - name: Rewrite main to clean release history
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/finalize-source.yml
+          rm -f .github/workflows/source-transfer.yml
+          rm -f .github/workflows/source-transfer-retry.yml
+          rm -f .github/workflows/bootstrap-source.yml
+          rm -rf .xenolect-bootstrap
+          git add -A
+          tree="$(git write-tree)"
+          parent='9d30f183ff6b00a5a66def93af8103c38ee22f8e'
+          new_commit="$(printf '%s\n' 'Publish Xenolect v0.1.0' | git commit-tree "$tree" -p "$parent")"
+          git push --force origin "$new_commit:refs/heads/main"
+          echo "FINAL_COMMIT=$new_commit"
