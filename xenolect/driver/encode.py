@@ -12,6 +12,7 @@ from xenolect.driver.ir import (
     NativeToolsRequest,
     ResultField,
     ResultLiteral,
+    TemplatedJsonToolCatalogRequest,
     TextFrame,
     ToolCallFields,
     effective_protocol,
@@ -42,30 +43,42 @@ def tools_for_request(tools: list[ToolDef], driver: Driver) -> list[dict[str, An
     return out
 
 
-def build_tool_preamble_messages(
-    tools: list[ToolDef], driver: Driver
-) -> list[dict[str, Any]]:
+def build_tool_preamble_messages(tools: list[ToolDef], driver: Driver) -> list[dict[str, Any]]:
     """Execute every textual tool-catalog request primitive."""
     transformed = [transform_tool_def(t, driver) for t in tools]
     messages: list[dict[str, Any]] = []
     for primitive in effective_protocol(driver).request:
-        if not isinstance(primitive, JsonToolCatalogRequest):
+        if isinstance(primitive, JsonToolCatalogRequest):
+            payload: Any = [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                }
+                for t in transformed
+            ]
+        elif isinstance(primitive, TemplatedJsonToolCatalogRequest):
+            item_fields = primitive.tool_fields
+            payload = [
+                {
+                    item_fields.name: t.name,
+                    item_fields.description: t.description,
+                    item_fields.parameters: t.parameters,
+                }
+                for t in transformed
+            ]
+            for key in reversed(primitive.catalog_path):
+                payload = {key: payload}
+        else:
             continue
-        payload = [
-            {
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.parameters,
-            }
-            for t in transformed
-        ]
+        sections = [primitive.instruction]
+        if primitive.catalog_heading:
+            sections.append(primitive.catalog_heading)
+        sections.append(json.dumps(payload, indent=2))
         messages.append(
             {
                 "role": primitive.role,
-                "content": (
-                    f"{primitive.instruction}\n{primitive.catalog_heading}\n"
-                    + json.dumps(payload, indent=2)
-                ),
+                "content": "\n".join(sections),
             }
         )
     return messages
@@ -98,7 +111,7 @@ def encode_textual_tool_call(
     textual = [
         primitive
         for primitive in effective_protocol(driver).request
-        if isinstance(primitive, JsonToolCatalogRequest)
+        if isinstance(primitive, (JsonToolCatalogRequest, TemplatedJsonToolCatalogRequest))
     ]
     if len(textual) != 1:
         raise ValueError(
@@ -164,6 +177,6 @@ def should_send_native_tools(driver: Driver) -> bool:
 
 def uses_textual_tool_catalog(driver: Driver) -> bool:
     return any(
-        isinstance(primitive, JsonToolCatalogRequest)
+        isinstance(primitive, (JsonToolCatalogRequest, TemplatedJsonToolCatalogRequest))
         for primitive in effective_protocol(driver).request
     )

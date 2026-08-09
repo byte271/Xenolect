@@ -42,15 +42,30 @@ The legacy v0.1.0 seed grammar is deliberately finite:
 
 That is **144 representable Driver programs** in v0.1.0.
 
-The v0.1.0 compiler used black-box probing and a stateful certification trajectory to infer and verify one of those programs. v0.2.0 preserves those proven request configurations as its bounded starting frontier, but response parser synthesis is no longer limited to the three legacy parser names. If observed behavior cannot be represented or certified, setup fails rather than pretending compatibility.
+The v0.1.0 compiler used black-box probing and a stateful certification trajectory to infer and verify one of those programs. v0.2.0 preserves those proven configurations as a compatibility seed frontier, but the current compiler can also refine typed partial protocol hypotheses from component-level black-box evidence. If observed behavior cannot be represented or certified, setup fails rather than pretending compatibility.
 
 Driver IR v0.2 is the current release format. It adds a composable foundation without widening the expensive online search budget. XPT still begins with the proven request configurations from the legacy 144-program frontier, then composes the observed request presentation, response parser, tool-result renderer, schema transforms, and required batch-state actions into a parameterized protocol program. The runtime executes those primitives rather than branching directly on three format names.
 
 The parameterized primitives can represent native calls, strict whole-content JSON calls, custom tagged or XML-style JSON frames, custom object field names, multiple agreeing response parsers, segmented tool-result messages, and assistant text carried beside tool calls. Existing v0.1 `.mdriver` files retain their previous JSON shape and content hash.
 
-XPT can now make one specific synthesis step beyond that fixed grammar: when the legacy response parsers produce no calls, it deterministically inspects the already-paid response for strict whole-content or embedded JSON tool objects, infers custom field names and adjacent literal delimiters, and validates the resulting response primitive across the remaining trajectory. Extraction is bounded; ambiguous field mappings, call IDs, or parser results fail closed. A Driver is still emitted only after the independent fresh-instance certification path passes.
+XPT can make a bounded response-synthesis step beyond that fixed grammar: when the legacy response parsers produce no calls, it deterministically inspects the already-paid response for strict whole-content or embedded JSON tool objects, infers custom field names and adjacent literal delimiters, and validates the resulting response primitive across the remaining trajectory. Extraction is bounded; ambiguous field mappings, call IDs, or parser results fail closed.
 
-This is not a claim of arbitrary protocol synthesis. Request and tool-result exploration remain bounded, arbitrary state transitions remain unsupported, and every compile stays inside the same 12-generation and 300-second defaults with three generations reserved for certification.
+The current development milestone adds the smallest active request/result synthesis foundation:
+
+- a partial hypothesis contains executable v0.2 primitives plus typed request, response, or tool-result holes;
+- each paid observation is decomposed into nonce-bound structural facts, counterexamples, and component proofs that later candidates can reuse;
+- the Tool ABI obligation-to-Driver-component map directs the next experiment to the unresolved or contradicted component;
+- only logical evidence may eliminate a candidate; novelty, complexity, expected obligation gain, and cost are ranking signals only;
+- one generic request primitive can render a tool catalog in a separate system or user message, with a bounded nested JSON wrapper, custom tool-definition fields, and custom call framing/fields. XPT can infer those parameters from a rejected-wire response containing one unambiguous catalog example and one nonce-bound call example; only the unobservable message placement is tested as a bounded typed choice;
+- the existing segmented `ToolResultMessage` primitive can be synthesized by locating the known tool name, call ID, and freshly minted result content inside an observed result-wire example. Literal segments are recovered locally; only bounded message placement choices require further generations;
+- a result-consumption counterexample changes only the result component. Proven request/response component fingerprints remain live;
+- the completed Driver must pass G1/G2/G3 and then the independent production-runtime certification on a fresh instance.
+
+The active path is deliberately narrow. A request-side rejection must expose one structurally unambiguous JSON catalog example and a framed call example containing the active challenge nonce. A result-side rejection must expose one exact rendering example containing a fresh post-prompt sentinel. A strict `xpt_counterexample` object carrying nonce-bound atomic equality constraints is also accepted as an alternative. Missing, conflicting, replayed, oversized, or ambiguous evidence fails closed. XPT does not infer arbitrary natural-language protocol descriptions, unbounded templates, arbitrary schema transformations, or state machines.
+
+The falsifiable milestone claim is: **XPT can actively synthesize and independently certify a previously unseen request + response + tool-result protocol program from black-box observations within the existing bounded compilation budget.** It is not a claim of universal or arbitrary protocol synthesis. Every compile remains inside the same 12-generation and 300-second defaults with three generations reserved for certification.
+
+The compile report includes every component constraint with its generation/request/response witness, every proof-only elimination, each obligation-directed experiment, component fingerprints before and after refinement, and the independent certification result.
 
 The diagnostic tools used during `xenolect install` are temporary conformance probes. They are not the tools your app later uses. At runtime, Xenolect transforms the real tools supplied by your app according to the installed Driver.
 
@@ -229,9 +244,11 @@ Xenolect exposes a local loopback service and supports:
 
 Buffered streaming means Xenolect first receives the complete upstream completion, then emits valid SSE chunks. **v0.2.0 does not provide token-by-token upstream streaming latency.**
 
-The following are **not** claimed by v0.2.0:
+The following are **not** claimed by v0.2.0 or the current development milestone:
 
-- arbitrary request, tool-result, or state-machine Driver synthesis; the v0.2 milestone currently adds bounded response-parser synthesis only
+- universal or arbitrary protocol synthesis
+- request/result synthesis without unambiguous bounded structural evidence
+- arbitrary schema-transform or state-machine synthesis
 - creation of application tools or tool implementations
 - `/v1/responses`
 - embeddings
