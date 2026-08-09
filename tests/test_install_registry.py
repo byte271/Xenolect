@@ -255,7 +255,8 @@ def test_cli_displays_failure_report_path(tmp_path: Path, monkeypatch) -> None:
     result = CliRunner().invoke(cli_main.app, ["install"])
     assert result.exit_code == 3
     assert "Diagnostic report:" in result.stdout
-    assert report_path.name in result.stdout
+    # Rich may wrap a long absolute path between any two filename characters.
+    assert report_path.name in "".join(result.stdout.split())
 
 
 @pytest.mark.parametrize(
