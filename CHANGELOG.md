@@ -2,17 +2,23 @@
 
 ## Unreleased
 
-### Oracle-free diagnostic protocol synthesis (v0.4.0 research gate)
+## 0.4.0 - 2026-08-09
+
+### Oracle-free diagnostic protocol synthesis
 
 - Added a typed, non-persistent Diagnostic Probe IR with explicit alternatives, positive outcomes, nonce-bound witnesses, predicted partitions, and auditable plans. Diagnostic probes are never Driver artifacts, registry entries, runtime profiles, or Tool ABI witnesses.
-- Kept the production spaces fixed at 33 request versions and three tool-result versions and retained Driver IR v0.2. No provider/model rules, grammar expansion, state-machine synthesis, or package-version change is included in this research PR.
+- Kept the production spaces fixed at 33 request versions and three tool-result versions and retained Driver IR v0.2. No provider/model rules, production grammar expansion, or state-machine synthesis was added.
 - Added normal-wire request contrast probes spanning native/textual catalogs, system/user placement, one/two-level containers, preserved/inlined references, embedded/framed calls, and semantic/compact fields. The endpoint sees only ordinary messages, tools, schemas, call syntax, and fresh canaries.
 - Added counterfactual result-consumption probes for tool-role attachment, tool-role embedded association, and user-role embedded association. Only an exact structured recovery call carrying the branch sentinel and fresh reply call ID is a valid positive witness.
 - Added deterministic minimax planning over predicted outcome partitions, with information score, generation/wire cost, complexity, and stable fingerprint tie-breaks. Planning scores remain ranking signals and never prove impossibility.
 - Added explicit pairwise identifiability reports, unexpected-outcome handling, fail-closed generic rejection/ambiguity behavior, and logical elimination records tied to exclusive positive witnesses. Generic rejection never becomes property-local evidence.
 - Kept diagnostic evidence separate from component facts, obligation support, complete G1/G2/G3 witnesses, and independent certification. Multiplexed diagnostic generations cannot prove Tool ABI obligations.
 - Added exhaustive offline gates over all 33 request and three result versions, a generated nine-case pairwise oracle-free interaction matrix, a non-identifiable adversarial endpoint, and a same-space candidate-only ablation. The diagnostic path certifies every generated case in seven diagnosis generations plus the reserved three certification turns.
+- Removed endpoint-visible diagnostic namespaces from request and result probes. Request alternatives reuse one ordinary `report` operation and vary only opaque nonce-bound argument and call-ID values; the native wire contains exactly one tool definition.
+- Added recursive wire isolation that rejects nested internal probe metadata and strips underscore-prefixed encoder bookkeeping before any diagnostic request reaches the endpoint.
+- Added post-certification wall-clock enforcement to the candidate-only ablation so a run that crosses the shared deadline fails unresolved instead of reporting success.
 - Preserved the 12-generation total budget, three-generation certification reserve, 300-second deadline, v0.1 canonical serialization/hash, v0.2 loading/runtime behavior, and the released v0.3 property-local path.
+- Verified 149 tests, focused Ruff, compileall, wheel build/smoke checks, independent diff review, and all six Windows, macOS, and Linux CI jobs on Python 3.11 and 3.13 before release.
 
 The narrow milestone claim is: XPT can synthesize nonce-bound diagnostic probes that distinguish a bounded protocol hypothesis space and produce an independently certified working request + response + tool-result Driver without receiving target values or property-local fault localization from the endpoint.
 
