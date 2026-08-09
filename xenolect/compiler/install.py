@@ -25,7 +25,7 @@ class ResolvedTarget:
     model_fingerprint: str | None = None
 
     @classmethod
-    def from_discovery(cls, endpoint: DiscoveredEndpoint, model: str) -> "ResolvedTarget":
+    def from_discovery(cls, endpoint: DiscoveredEndpoint, model: str) -> ResolvedTarget:
         return cls(
             base_url=endpoint.base_url.rstrip("/"),
             model=model,
@@ -43,7 +43,7 @@ class InstallReport:
     elapsed_s: float
     generations: int
     installed: InstalledDriver | None = None
-    compile: "RealCompileReport | None" = None
+    compile: RealCompileReport | None = None
     report_path: Path | None = None
     exported_to: Path | None = None
 
@@ -186,6 +186,14 @@ def install_target(
             "controlled_protocol_interventions": True,
             "behavioral_delta_analysis": True,
             "property_local_api_rejections": True,
+            "oracle_free_diagnostic_probes": True,
+            "diagnostic_probe_persistent": False,
+            "diagnostic_probe_is_abi_witness": False,
+            "nonce_bound_positive_witnesses": True,
+            "minimax_partition_planning": True,
+            "explicit_identifiability_check": True,
+            "request_version_space": 33,
+            "tool_result_version_space": 3,
             "target_protocol_required": False,
             "provider_or_model_identity_used": False,
             "arbitrary_protocol_synthesis": False,

@@ -193,6 +193,7 @@ class EvidenceStrength(StrEnum):
 class EvidenceKind(StrEnum):
     STRUCTURAL_FACT = "structural_fact"
     COMPONENT_OBSERVATION = "component_observation"
+    DIAGNOSTIC_WITNESS = "diagnostic_witness"
     NEGATIVE_BEHAVIOR = "negative_behavior"
     COUNTEREXAMPLE = "counterexample"
 
@@ -372,6 +373,30 @@ class EvidenceStore:
         self.record(evidence)
         self.eliminated.setdefault(component, set()).add(candidate_fingerprint)
 
+    def eliminate_by_diagnostic_partition(
+        self,
+        component: ProtocolComponent,
+        candidate_fingerprints: set[str],
+        *,
+        evidence: ComponentEvidence,
+    ) -> None:
+        """Eliminate outcomes excluded by an exclusive positive witness.
+
+        This is intentionally separate from contradiction elimination.  A
+        nonce-bound structured call can prove which predicted probe partition
+        produced the observation even though no candidate contradicted the
+        endpoint.  The evidence remains component-level discrimination, never
+        an ABI-obligation witness.
+        """
+        if evidence.component != component:
+            raise ValueError("diagnostic evidence cannot refine an unrelated component")
+        if evidence.strength != EvidenceStrength.LOGICAL:
+            raise ValueError("heuristic diagnostic evidence cannot eliminate")
+        if evidence.kind != EvidenceKind.DIAGNOSTIC_WITNESS:
+            raise ValueError("partition elimination requires a diagnostic witness")
+        self.record(evidence)
+        self.eliminated.setdefault(component, set()).update(candidate_fingerprints)
+
     def is_eliminated(self, component: ProtocolComponent, candidate_fingerprint: str) -> bool:
         return candidate_fingerprint in self.eliminated.get(component, set())
 
@@ -482,8 +507,12 @@ class ProtocolSynthesisReport:
     version_spaces: list[dict[str, Any]] = field(default_factory=list)
     behavioral_deltas: list[dict[str, Any]] = field(default_factory=list)
     discriminating: bool = False
+    oracle_free: bool = False
+    probe_plans: list[dict[str, Any]] = field(default_factory=list)
+    identifiability: dict[str, Any] | None = None
     final_hypothesis: PartialProtocolHypothesis | None = None
     failure: str | None = None
+    failure_class: str | None = None
     certification: dict[str, Any] | None = None
 
     def record_experiment(self, experiment: PlannedExperiment) -> None:
@@ -522,22 +551,37 @@ class ProtocolSynthesisReport:
         )
 
     def as_dict(self) -> dict[str, Any]:
-        return {
-            "mode": (
-                "bounded_active_discriminating_synthesis"
-                if self.discriminating
-                else "bounded_obligation_directed_cegis"
-            ),
-            "claim": (
+        if self.oracle_free:
+            mode = "bounded_oracle_free_diagnostic_synthesis"
+            claim = (
+                "XPT can synthesize nonce-bound diagnostic probes that distinguish a "
+                "bounded protocol hypothesis space and produce an independently "
+                "certified working request + response + tool-result Driver without "
+                "receiving target values or property-local fault localization from "
+                "the endpoint."
+            )
+        elif self.discriminating:
+            mode = "bounded_active_discriminating_synthesis"
+            claim = (
                 "design discriminating black-box experiments and synthesize a certified "
                 "working request + response + tool-result protocol without a target format"
-                if self.discriminating
-                else "actively synthesize and independently certify a previously unseen "
+            )
+        else:
+            mode = "bounded_obligation_directed_cegis"
+            claim = (
+                "actively synthesize and independently certify a previously unseen "
                 "request + response + tool-result protocol from black-box observations"
-            ),
+            )
+        return {
+            "mode": mode,
+            "claim": claim,
             "arbitrary_protocol_synthesis": False,
             "state_synthesis": False,
+            "property_local_fault_localization_used": not self.oracle_free,
+            "diagnostic_probe_is_production_driver": False,
             "experiments": list(self.experiments),
+            "probe_plans": list(self.probe_plans),
+            "identifiability": dict(self.identifiability) if self.identifiability else None,
             "version_spaces": list(self.version_spaces),
             "behavioral_deltas": list(self.behavioral_deltas),
             "evidence": self.evidence.as_dict(),
@@ -547,4 +591,5 @@ class ProtocolSynthesisReport:
             ),
             "certification": dict(self.certification) if self.certification else None,
             "failure": self.failure,
+            "failure_class": self.failure_class,
         }
