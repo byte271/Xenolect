@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Repository maintenance
+
+- After successful CI on `main`, repository automation removes only `agent/*`
+  branches whose pull requests are already merged. The default branch, tags, open
+  work, and unmerged branches are excluded.
+
 ## 0.5.0 - 2026-08-09
 
 ### Reliability and certification semantics
