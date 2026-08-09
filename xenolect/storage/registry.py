@@ -9,14 +9,20 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from xenolect.abi import ABI_VERSION
+from xenolect.certification_profile import (
+    CertifiedExecutionProfile,
+    compiler_execution_profile,
+)
 from xenolect.driver.ir import Driver
 from xenolect.driver.serialize import driver_hash, driver_to_json, load_driver
 
@@ -72,6 +78,9 @@ class InstalledDriver:
     generations: int | None = None
     compile_elapsed_s: float | None = None
     model_fingerprint: str | None = None
+    certified_execution_profile: CertifiedExecutionProfile = field(
+        default_factory=compiler_execution_profile
+    )
 
     def load(self) -> Driver:
         driver = load_driver(self.driver_path)
@@ -134,6 +143,12 @@ class DriverRegistry:
             raise RegistryError(f"malformed registry binding: {key}")
         try:
             path = self._safe_driver_path(str(raw["driver_file"]))
+            profile_payload = raw.get("certified_execution_profile")
+            profile = (
+                CertifiedExecutionProfile.legacy_v04()
+                if profile_payload is None
+                else CertifiedExecutionProfile.from_dict(profile_payload)
+            )
             item = InstalledDriver(
                 binding_id=key,
                 base_url=str(raw["base_url"]),
@@ -146,6 +161,7 @@ class DriverRegistry:
                 generations=raw.get("generations"),
                 compile_elapsed_s=raw.get("compile_elapsed_s"),
                 model_fingerprint=raw.get("model_fingerprint"),
+                certified_execution_profile=profile,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise RegistryError(f"malformed registry binding: {key}") from exc
@@ -238,6 +254,7 @@ class DriverRegistry:
         compile_elapsed_s: float | None = None,
         metadata: dict[str, Any] | None = None,
         model_fingerprint: str | None = None,
+        certified_execution_profile: CertifiedExecutionProfile | None = None,
     ) -> InstalledDriver:
         data = self._read()
         self.drivers_dir.mkdir(parents=True, exist_ok=True)
@@ -271,6 +288,9 @@ class DriverRegistry:
             "generations": generations,
             "compile_elapsed_s": compile_elapsed_s,
             "model_fingerprint": model_fingerprint,
+            "certified_execution_profile": (
+                certified_execution_profile or compiler_execution_profile()
+            ).as_dict(),
         }
         if metadata:
             # Metadata is diagnostic only.  Never accept secrets through this API.
@@ -318,16 +338,25 @@ class DriverRegistry:
             out.append(item)
         return sorted(out, key=lambda item: (item.base_url, item.model))
 
-    def write_report(self, binding: InstalledDriver, payload: dict[str, Any]) -> Path:
+    def _write_report(
+        self,
+        report_key: str,
+        payload: dict[str, Any],
+        *,
+        secrets: tuple[str | None, ...] = (),
+    ) -> Path:
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-        path = self.reports_dir / f"{binding.binding_id}-{stamp}-{uuid.uuid4().hex[:12]}.json"
-        _atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        path = self.reports_dir / f"{report_key}-{stamp}-{uuid.uuid4().hex[:12]}.json"
+        redacted = redact_report_payload(payload, secrets=secrets)
+        if isinstance(redacted, dict):
+            redacted["report_path"] = str(path)
+        _atomic_write_text(path, json.dumps(redacted, indent=2, sort_keys=True) + "\n")
 
         # Reports are diagnostics, not product state. Keep them bounded so repeated
         # forced rebuilds cannot grow XENOLECT_HOME forever.
         reports = sorted(
-            self.reports_dir.glob(f"{binding.binding_id}-*.json"),
+            self.reports_dir.glob(f"{report_key}-*.json"),
             key=lambda item: item.name,
             reverse=True,
         )
@@ -338,12 +367,112 @@ class DriverRegistry:
                 pass
         return path
 
+    def write_report(
+        self,
+        binding: InstalledDriver,
+        payload: dict[str, Any],
+        *,
+        secrets: tuple[str | None, ...] = (),
+    ) -> Path:
+        return self._write_report(
+            binding.binding_id,
+            payload,
+            secrets=secrets,
+        )
+
+    def write_compile_report(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        payload: dict[str, Any],
+        target_abi: str = ABI_VERSION,
+        secrets: tuple[str | None, ...] = (),
+    ) -> Path:
+        """Persist a terminal compile report even when no Driver was installed."""
+
+        return self._write_report(
+            binding_id(base_url, model, target_abi),
+            payload,
+            secrets=secrets,
+        )
+
 
 def export_driver(installed: InstalledDriver, destination: str | Path) -> Path:
     dest = Path(destination)
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(installed.driver_path, dest)
     return dest
+
+
+_SECRET_KEYS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "proxy_authorization",
+    "x_api_key",
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "password",
+    "secret",
+}
+_SENSITIVE_QUERY_KEYS = {"api_key", "apikey", "key", "token", "access_token"}
+_BEARER = re.compile(r"(?i)\bbearer\s+[^\s\"']+")
+
+
+def _redact_endpoint_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname
+        if host is None:
+            return value
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        netloc = host + (f":{parsed.port}" if parsed.port is not None else "")
+        query = urlencode(
+            [
+                (key, "[REDACTED]" if key.lower() in _SENSITIVE_QUERY_KEYS else item)
+                for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+            ]
+        )
+        return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+    except (TypeError, ValueError):
+        return "[REDACTED_INVALID_ENDPOINT_URL]"
+
+
+def redact_report_payload(
+    value: Any,
+    *,
+    secrets: tuple[str | None, ...] = (),
+) -> Any:
+    """Return a JSON-compatible report payload with credential material removed."""
+
+    concrete_secrets = tuple(secret for secret in secrets if secret)
+
+    def visit(item: Any, key_hint: str | None = None) -> Any:
+        normalized_key = (key_hint or "").lower().replace("-", "_")
+        if normalized_key in _SECRET_KEYS:
+            return "[REDACTED]"
+        if isinstance(item, dict):
+            return {str(key): visit(child, str(key)) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [visit(child) for child in item]
+        if isinstance(item, str):
+            looks_like_url = "://" in item
+            text = (
+                _redact_endpoint_url(item)
+                if normalized_key in {"base_url", "url", "endpoint_url"}
+                or looks_like_url
+                else item
+            )
+            text = _BEARER.sub("Bearer [REDACTED]", text)
+            for secret in concrete_secrets:
+                text = text.replace(secret, "[REDACTED]")
+            return text
+        return item
+
+    return visit(value)
 
 
 def _atomic_write_text(path: Path, text: str) -> None:

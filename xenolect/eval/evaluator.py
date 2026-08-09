@@ -27,6 +27,7 @@ from xenolect.abi.events import (
 from xenolect.abi.trace import validate_completed_trace, validate_trace
 from xenolect.driver.termination import Termination
 from xenolect.eval.schema import validate_tool_arguments
+from xenolect.eval.termination import assess_event_g3_termination
 
 ProbeKind = Literal["protocol", "semantic"]
 
@@ -115,6 +116,12 @@ class ProbeExpectation:
     expected_primary_tool: str | None = None
     # Optional final text exact match (protocol no-call scripts)
     expected_final_text: str | None = None
+    # Protocol-semantic final witness. The sentinel must come from this tool's
+    # result after being absent from all earlier trace material.
+    expected_final_sentinel: str | None = None
+    final_sentinel_source_tool: str | None = None
+    # Optional instruction-following diagnostic; never an interface gate.
+    diagnostic_expected_final_text: str | None = None
     result_dependencies: list[ResultDependency] | None = None
 
 
@@ -404,7 +411,13 @@ def evaluate_trace(
                     semantic_ok = False
                     semantic_category = FailureCategory.SEMANTIC_ARGUMENT_VALUE
 
-        if expectation.require_final_text or expectation.expected_final_text is not None:
+        final_text_required = (
+            expectation.require_final_text
+            or expectation.expected_final_text is not None
+            or expectation.expected_final_sentinel is not None
+            or expectation.diagnostic_expected_final_text is not None
+        )
+        if final_text_required:
             if not events or not isinstance(events[-1], AssistantText):
                 if as_interface:
                     interface_errors.append("expected final AssistantText")
@@ -425,6 +438,43 @@ def evaluate_trace(
                     else:
                         semantic_errors.append(msg)
                         semantic_ok = False
+
+        if expectation.expected_final_sentinel is not None:
+            source_tool = expectation.final_sentinel_source_tool
+            if not source_tool:
+                raise ValueError(
+                    "expected_final_sentinel requires final_sentinel_source_tool"
+                )
+            witness = assess_event_g3_termination(
+                events,
+                expected_sentinel=expectation.expected_final_sentinel,
+                source_tool=source_tool,
+                parse_errors=tuple(parse_errors or ()),
+                normal_termination=termination in (None, Termination.COMPLETED),
+            )
+            details["final_termination_witness"] = witness.as_dict()
+            if not witness.protocol_termination_verified:
+                msg = (
+                    "final protocol termination witness failed: "
+                    + ", ".join(witness.failure_codes)
+                )
+                if as_interface:
+                    interface_errors.append(msg)
+                    interface_category = FailureCategory.HISTORY_REPRESENTATION
+                else:
+                    semantic_errors.append(msg)
+                    semantic_ok = False
+
+        if expectation.diagnostic_expected_final_text is not None:
+            actual = (
+                events[-1].content
+                if events and isinstance(events[-1], AssistantText)
+                else None
+            )
+            details["exact_response_format_followed"] = (
+                actual is not None
+                and actual.strip() == expectation.diagnostic_expected_final_text.strip()
+            )
 
         if expectation.min_tool_cycles > 0:
             cycles = _count_tool_cycles(events)

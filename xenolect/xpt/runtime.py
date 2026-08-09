@@ -62,6 +62,7 @@ from xenolect.driver.ir import (
 )
 from xenolect.driver.parse import parse_model_response_full
 from xenolect.driver.termination import Termination
+from xenolect.eval.termination import FinalTerminationWitness, assess_g3_termination
 from xenolect.xpt.certify import certify
 from xenolect.xpt.diagnostic_probe import (
     MAX_REQUEST_PROBES,
@@ -95,8 +96,10 @@ from xenolect.xpt.frontier import (
 )
 from xenolect.xpt.gauntlet import (
     RECOVERY_TOOLS,
+    GauntletInstance,
     gauntlet_tools,
     mint_instance,
+    render_user_turn,
 )
 from xenolect.xpt.hypothesis import (
     ContradictionClass,
@@ -142,7 +145,13 @@ from xenolect.xpt.session import (
     Ledger,
     XptSession,
 )
-from xenolect.xpt.syndrome import ParseConsensus, Syndrome, apply_discovered_response
+from xenolect.xpt.syndrome import (
+    ParseConsensus,
+    Syndrome,
+    apply_discovered_response,
+    build_syndrome,
+    sha,
+)
 
 CERTIFIED = "CERTIFIED"
 UNSUPPORTED = "UNSUPPORTED"
@@ -170,6 +179,7 @@ class XptResult:
     #: different latency profiles.
     io_sizes: list[tuple[int, int]] = field(default_factory=list)
     synthesis_report: ProtocolSynthesisReport | None = None
+    failure_class: str | None = None
 
     @property
     def total_generations(self) -> int:
@@ -180,18 +190,95 @@ class XptResult:
             "status": self.status,
             "driver": self.driver.canonical_dict() if self.driver else None,
             "reason": self.reason,
+            "failure_class": self.resolved_failure_class,
             "diagnosis_generations": self.diagnosis_generations,
             "certification_generations": self.certification_generations,
             "total_generations": self.total_generations,
             "failed_obligations": list(self.failed_obligations),
             "mandatory_coverage": self.certificate.mandatory_coverage,
+            "certificate": self.certificate.as_dict(),
             "wall_clock_s": self.wall_clock_s,
             "left_compiled_dag": self.left_compiled_dag,
             "equivalent_parsers": list(self.equivalent_parsers),
             "io_sizes": [list(x) for x in self.io_sizes],
+            "evidence_summary": self.evidence_summary(),
+            "ledger": self.ledger.as_dict(),
             "protocol_synthesis": (
                 self.synthesis_report.as_dict() if self.synthesis_report is not None else None
             ),
+        }
+
+    @property
+    def resolved_failure_class(self) -> str | None:
+        if self.failure_class is not None:
+            return self.failure_class
+        if self.status == CERTIFIED:
+            return None
+        if self.status == BUDGET_EXHAUSTED:
+            return "budget_exhaustion"
+        if self.status == ENDPOINT_TOO_SLOW:
+            return "endpoint_too_slow"
+        if self.status == INFRASTRUCTURE_FAILED:
+            return "infrastructure_failure"
+        if self.status == CONFIGURATION_FAILED:
+            return "endpoint_configuration_failure"
+        if self.failed_obligations:
+            return "independent_certification_failure"
+        if self.synthesis_report is not None and self.synthesis_report.failure_class:
+            return self.synthesis_report.failure_class
+        return "unsupported_no_working_program"
+
+    def evidence_summary(self) -> dict[str, Any]:
+        termination = [
+            decision
+            for decision in self.ledger.decisions
+            if "termination" in str(decision.get("phase", ""))
+        ]
+        g1_successes = sum(
+            1
+            for decision in self.ledger.decisions
+            if decision.get("phase") in {"config", "config-continued"}
+            and decision.get("succeeded") is True
+        )
+        g1_successes += sum(
+            1
+            for delta in (
+                self.synthesis_report.behavioral_deltas
+                if self.synthesis_report is not None
+                else ()
+            )
+            if delta.get("outcome") == "exact_G1_batch"
+        )
+        g2_successes = sum(
+            1
+            for decision in self.ledger.decisions
+            if decision.get("phase") == "result_encoding"
+            and decision.get("succeeded") is True
+        )
+        g2_successes += sum(
+            1
+            for delta in (
+                self.synthesis_report.behavioral_deltas
+                if self.synthesis_report is not None
+                else ()
+            )
+            if delta.get("outcome") == "exact_G2_recovery_batch"
+        )
+        return {
+            "request_protocols_with_valid_g1": g1_successes,
+            "result_trajectories_with_valid_g2": g2_successes,
+            "protocol_termination_witnesses": sum(
+                decision.get("protocol_termination_verified") is True
+                for decision in termination
+            ),
+            "exact_response_format_style_deviations": sum(
+                decision.get("protocol_termination_verified") is True
+                and decision.get("exact_response_format_followed") is False
+                for decision in termination
+            ),
+            "working_protocol_evidence_observed": g1_successes > 0 and g2_successes > 0,
+            "independent_certification_attempted": self.certification_generations > 0,
+            "failed_obligations": list(self.failed_obligations),
         }
 
 
@@ -264,6 +351,65 @@ def _observe_with_driver(
         elif isinstance(event, AssistantText):
             text_parts.append(event.content)
     return tuple(calls), is_batch, "".join(text_parts), tuple(parsed.errors)
+
+
+def _diagnosis_g3_witness(
+    inst: GauntletInstance,
+    *,
+    final_text: str,
+    has_tool_calls: bool,
+    parser_ambiguous: bool = False,
+    parse_errors: tuple[str, ...] = (),
+) -> FinalTerminationWitness:
+    """Apply the same nonce/provenance rule to a paid diagnosis G3 turn."""
+
+    unavailable = (
+        render_user_turn(inst),
+        inst.expected_batch_arguments(),
+        inst.result_for("record_alpha"),
+        inst.result_for("record_beta"),
+        inst.gamma_error_text(),
+        inst.recovery_results()["commit"],
+    )
+    return assess_g3_termination(
+        final_text=final_text,
+        expected_sentinel=inst.ack_value,
+        source_payload=inst.recovery_results()["report"],
+        unavailable_payloads=unavailable,
+        has_tool_calls=has_tool_calls,
+        parser_ambiguous=parser_ambiguous,
+        parse_errors=parse_errors,
+        normal_termination=True,
+    )
+
+
+def _termination_observation(witness: FinalTerminationWitness) -> str:
+    if witness.protocol_termination_verified:
+        return "protocol_termination_verified"
+    if "parser_ambiguity" in witness.failure_codes or "parser_error" in witness.failure_codes:
+        return "parser_or_schema_contradiction"
+    if "spurious_tool_call" in witness.failure_codes:
+        return "spurious_tool_call_observed"
+    return "insufficient_nonce_bound_termination_evidence"
+
+
+def _termination_evidence_class(witness: FinalTerminationWitness) -> str:
+    if witness.protocol_termination_verified:
+        return (
+            "protocol_termination_verified"
+            if witness.exact_response_format_followed
+            else "model_style_instruction_deviation"
+        )
+    if "parser_ambiguity" in witness.failure_codes or "parser_error" in witness.failure_codes:
+        return "parser_schema_contradiction"
+    if (
+        "spurious_tool_call" in witness.failure_codes
+        or "noncompleted_turn" in witness.failure_codes
+    ):
+        return "termination_protocol_observation_failed"
+    if "missing_or_nonunique_source" in witness.failure_codes:
+        return "tool_result_protocol_evidence_insufficient"
+    return "ordinary_negative_model_behavior"
 
 
 class XptCompiler:
@@ -643,6 +789,7 @@ class XptCompiler:
         rejection: ProtocolRejection,
         generation: Generation,
     ) -> None:
+        self.synthesis_report.property_local_rejections_observed += 1
         evidence = counterexample_evidence(
             component=rejection.component,
             generation=generation,
@@ -664,6 +811,7 @@ class XptCompiler:
         removed = space.eliminate_rejected_value(
             tested, rejection, evidence_id=evidence.evidence_id
         )
+        self.synthesis_report.property_local_rejections_used += 1
         self.synthesis_report.behavioral_deltas.append(
             {
                 "generation_id": generation.index,
@@ -1517,30 +1665,35 @@ class XptCompiler:
                 ),
                 offered_tool_names={t.name for t in gauntlet_tools()},
             )
-            final_text = (syn3.content_text or "").strip()
+            final_text = syn3.content_text or ""
             # G3 is a no-call turn: require that *no* parser produced tool calls
             # (not merely that accepted_parser is unset under AMBIGUOUS).
             any_parser_calls = any(o.n_calls > 0 for o in syn3.parser_outcomes.values())
-            g3_ok = (
-                syn3.consensus != ParseConsensus.AMBIGUOUS
-                and not any_parser_calls
-                and not syn3.tool_call_emitted
-                and final_text == inst.ack_value
+            parser_errors = tuple(
+                sorted(
+                    {
+                        error
+                        for outcome in syn3.parser_outcomes.values()
+                        for error in outcome.errors
+                    }
+                )
             )
+            termination_witness = _diagnosis_g3_witness(
+                inst,
+                final_text=final_text,
+                has_tool_calls=any_parser_calls or syn3.tool_call_emitted,
+                parser_ambiguous=syn3.consensus == ParseConsensus.AMBIGUOUS,
+                parse_errors=parser_errors,
+            )
+            g3_ok = termination_witness.protocol_termination_verified
             self.session.ledger.decide(
                 phase="termination",
                 encoding=encoding.value,
-                observation=(
-                    "final_ack"
-                    if g3_ok
-                    else (
-                        "ambiguous_parse"
-                        if syn3.consensus == ParseConsensus.AMBIGUOUS
-                        else ("tool_calls" if any_parser_calls else "bad_or_missing_ack")
-                    )
-                ),
+                observation=_termination_observation(termination_witness),
+                evidence_class=_termination_evidence_class(termination_witness),
                 succeeded=g3_ok,
                 final_text=final_text[:80],
+                **termination_witness.as_dict(),
             )
             if g3_ok:
                 traj.branch = fork
@@ -1628,14 +1781,22 @@ class XptCompiler:
             final_calls, _, final_text, final_errors = _observe_with_driver(
                 generation3.response, driver
             )
-            g3_ok = not final_errors and not final_calls and final_text.strip() == inst.ack_value
+            termination_witness = _diagnosis_g3_witness(
+                inst,
+                final_text=final_text,
+                has_tool_calls=bool(final_calls),
+                parse_errors=tuple(final_errors),
+            )
+            g3_ok = termination_witness.protocol_termination_verified
             self.session.ledger.decide(
                 phase="termination",
                 encoding=encoding.value,
-                observation="final_ack" if g3_ok else "bad_or_ambiguous_termination",
+                observation=_termination_observation(termination_witness),
+                evidence_class=_termination_evidence_class(termination_witness),
                 parse_errors=list(final_errors),
                 succeeded=g3_ok,
                 final_text=final_text[:80],
+                **termination_witness.as_dict(),
             )
             if g3_ok:
                 traj.branch = fork
@@ -1912,28 +2073,34 @@ class XptCompiler:
         final_calls, _, final_text, final_errors = _observe_with_driver(
             generation3.response, driver
         )
-        g3_ok = (
-            not final_errors
-            and not final_calls
-            and final_text.strip() == self.diag_inst.ack_value
+        termination_witness = _diagnosis_g3_witness(
+            self.diag_inst,
+            final_text=final_text,
+            has_tool_calls=bool(final_calls),
+            parse_errors=tuple(final_errors),
         )
+        g3_ok = termination_witness.protocol_termination_verified
         self.session.ledger.decide(
             phase="oracle-free-clean-termination",
             generation=generation3.index,
-            observation="final_ack" if g3_ok else "bad_or_ambiguous_termination",
+            observation=_termination_observation(termination_witness),
+            evidence_class=_termination_evidence_class(termination_witness),
             parse_errors=list(final_errors),
             succeeded=g3_ok,
+            **termination_witness.as_dict(),
         )
         if not g3_ok:
             negative = negative_behavior_evidence(
                 component=ProtocolComponent.RESPONSE,
                 generation=generation3,
-                observation="clean G3 did not produce exact no-call termination",
+                observation="clean G3 lacked a nonce-bound no-call termination witness",
             )
             self.synthesis_report.evidence.record(negative)
             self._active_failure = "oracle-free synthesized protocol failed clean G3"
             self.synthesis_report.failure = self._active_failure
-            self.synthesis_report.failure_class = "no_working_program_found"
+            self.synthesis_report.failure_class = _termination_evidence_class(
+                termination_witness
+            )
             return None
 
         request_fact = component_observation_evidence(
@@ -1944,7 +2111,7 @@ class XptCompiler:
         termination_fact = component_observation_evidence(
             component=ProtocolComponent.RESPONSE,
             generation=generation3,
-            observation="the response program parsed exact final text and no call",
+            observation="the response program parsed a nonce-bound final text and no call",
         )
         cycle_fact = component_observation_evidence(
             component=ProtocolComponent.TOOL_RESULT,
@@ -1964,7 +2131,7 @@ class XptCompiler:
             ),
             observation=(
                 "the complete clean three-turn diagnosis trace contains two result "
-                "cycles, unambiguous no-call termination and exact final text"
+                "cycles and unambiguous nonce-bound no-call termination"
             ),
         ):
             self.synthesis_report.evidence.record_witness(witness)
@@ -2118,27 +2285,34 @@ class XptCompiler:
             final_calls, _, final_text, final_errors = _observe_with_driver(
                 generation3.response, driver
             )
-            g3_ok = (
-                not final_errors
-                and not final_calls
-                and final_text.strip() == self.diag_inst.ack_value
+            termination_witness = _diagnosis_g3_witness(
+                self.diag_inst,
+                final_text=final_text,
+                has_tool_calls=bool(final_calls),
+                parse_errors=tuple(final_errors),
             )
+            g3_ok = termination_witness.protocol_termination_verified
             self.session.ledger.decide(
                 phase="active-discriminating-termination",
                 generation=generation3.index,
-                observation="final_ack" if g3_ok else "bad_or_ambiguous_termination",
+                observation=_termination_observation(termination_witness),
+                evidence_class=_termination_evidence_class(termination_witness),
                 parse_errors=list(final_errors),
                 succeeded=g3_ok,
+                **termination_witness.as_dict(),
             )
             if not g3_ok:
                 negative = negative_behavior_evidence(
                     component=ProtocolComponent.RESPONSE,
                     generation=generation3,
-                    observation="the final turn did not produce exact no-call termination",
+                    observation="the final turn lacked a nonce-bound no-call termination witness",
                 )
                 self.synthesis_report.evidence.record(negative)
                 self._active_failure = "synthesized discriminating protocol failed G3 termination"
                 self.synthesis_report.failure = self._active_failure
+                self.synthesis_report.failure_class = _termination_evidence_class(
+                    termination_witness
+                )
                 self.synthesis_report.version_spaces.append(space.as_dict())
                 return None
 
@@ -2150,7 +2324,7 @@ class XptCompiler:
             termination_fact = component_observation_evidence(
                 component=ProtocolComponent.RESPONSE,
                 generation=generation3,
-                observation="the response parser emitted exact final text and no call",
+                observation="the response parser emitted nonce-bound final text and no call",
             )
             cycle_fact = component_observation_evidence(
                 component=ProtocolComponent.TOOL_RESULT,
@@ -2170,7 +2344,7 @@ class XptCompiler:
                 ),
                 observation=(
                     "the complete diagnosis trajectory contains two result cycles, "
-                    "unambiguous no-call termination, and exact final text"
+                    "unambiguous nonce-bound no-call termination"
                 ),
             ):
                 self.synthesis_report.evidence.record_witness(witness)
@@ -2417,19 +2591,28 @@ class XptCompiler:
         final_calls, _, final_text, final_errors = _observe_with_driver(
             generation3.response, driver
         )
-        g3_ok = (
-            not final_errors and not final_calls and final_text.strip() == self.diag_inst.ack_value
+        termination_witness = _diagnosis_g3_witness(
+            self.diag_inst,
+            final_text=final_text,
+            has_tool_calls=bool(final_calls),
+            parse_errors=tuple(final_errors),
         )
+        g3_ok = termination_witness.protocol_termination_verified
         self.session.ledger.decide(
             phase="active-termination",
             generation=generation3.index,
-            observation="final_ack" if g3_ok else "bad_or_ambiguous_termination",
+            observation=_termination_observation(termination_witness),
+            evidence_class=_termination_evidence_class(termination_witness),
             parse_errors=list(final_errors),
             succeeded=g3_ok,
+            **termination_witness.as_dict(),
         )
         if not g3_ok:
             self._active_failure = "synthesized protocol failed G3 termination"
             self.synthesis_report.failure = self._active_failure
+            self.synthesis_report.failure_class = _termination_evidence_class(
+                termination_witness
+            )
             return None
         request_termination_fact = component_observation_evidence(
             component=ProtocolComponent.REQUEST,
@@ -2439,14 +2622,14 @@ class XptCompiler:
         response_termination_fact = component_observation_evidence(
             component=ProtocolComponent.RESPONSE,
             generation=generation3,
-            observation="the response program parsed exact final text with no tool calls",
+            observation="the response program parsed nonce-bound final text with no tool calls",
         )
         result_termination_fact = component_observation_evidence(
             component=ProtocolComponent.TOOL_RESULT,
             generation=generation3,
             observation=(
                 "the same result renderer carried recovery results and produced the "
-                "exact no-call acknowledgement"
+                "nonce-bound no-call acknowledgement"
             ),
         )
         for fact in (
@@ -2466,7 +2649,7 @@ class XptCompiler:
             ),
             observation=(
                 "the full three-turn diagnosis trace completed two result cycles, "
-                "had no spurious final call, terminated with exact text, and parsed "
+                "had no spurious final call, terminated with a fresh sentinel, and parsed "
                 "without ambiguity"
             ),
         )
@@ -2482,8 +2665,9 @@ class XptCompiler:
     # top level
     # ------------------------------------------------------------------
 
-    def _account_cert_generations(self, n: int, *, driver: Driver, label: str) -> None:
-        """Record certification cost without permitting ledger budget overflow."""
+    def _account_cert_generations(self, run: Any, *, driver: Driver, label: str) -> None:
+        """Record the actual certification wire without permitting budget overflow."""
+        n = run.generations
         if n > CERTIFICATION_GENERATION_UPPER_BOUND:
             raise BudgetExhausted(
                 "certification produced more generations than its hard upper bound "
@@ -2496,7 +2680,9 @@ class XptCompiler:
                 f"(used={used}, certification={n}, "
                 f"max={self.session.budget.max_generations})"
             )
-        for i in range(n):
+        for interaction in run.wire:
+            request = interaction.get("request") or {}
+            response = interaction.get("response")
             self.session.ledger.generations.append(
                 Generation(
                     index=len(self.session.ledger.generations) + 1,
@@ -2504,16 +2690,21 @@ class XptCompiler:
                     label=label,
                     branch_id="cert",
                     forked_from=None,
-                    prefix_hash="",
+                    prefix_hash=sha(request.get("messages", [])),
                     driver=driver.canonical_dict(),
-                    request={},
-                    request_hash=f"cert:{label}:{i}",
-                    response=None,
-                    response_hash=None,
-                    error=None,
-                    latency_ms=0.0,
-                    prompt_chars=0,
-                    completion_chars=0,
+                    request=request,
+                    request_hash=sha(request),
+                    response=response,
+                    response_hash=sha(response) if response is not None else None,
+                    error=interaction.get("error"),
+                    latency_ms=float(interaction.get("latency_ms", 0.0)),
+                    prompt_chars=len(_json(request)),
+                    completion_chars=len(_json(response)) if response is not None else 0,
+                    syndrome=(
+                        build_syndrome(response).as_dict()
+                        if isinstance(response, dict)
+                        else None
+                    ),
                     selection_reason="independent certification",
                 )
             )
@@ -2684,7 +2875,7 @@ class XptCompiler:
                     )
                 cert_gens_total += run.generations
                 self._account_cert_generations(
-                    run.generations, driver=driver, label=f"cert@{traj.config.key}"
+                    run, driver=driver, label=f"cert@{traj.config.key}"
                 )
 
                 # Obligations + production evaluator must both pass (certify.passed).
@@ -2697,6 +2888,14 @@ class XptCompiler:
                             "production_runtime": True,
                             "generations": run.generations,
                             "mandatory_coverage": run.certificate.mandatory_coverage,
+                            "protocol_termination_verified": (
+                                run.certificate.status_of("OB16").value == "VERIFIED"
+                            ),
+                            "exact_response_format_followed": (
+                                run.evaluator_result.get("details", {}).get(
+                                    "exact_response_format_followed"
+                                )
+                            ),
                             "certificate": run.certificate.as_dict(),
                             "reason": (
                                 "the final unchanged Driver survived all mandatory ABI "

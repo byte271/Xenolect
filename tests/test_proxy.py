@@ -208,6 +208,32 @@ def test_proxy_service_uses_installed_driver_and_upstream(tmp_path):
     assert out["choices"][0]["message"]["tool_calls"][0]["id"] == "abc"
 
 
+def test_proxy_applies_certified_sampling_default_only_when_app_omits_it(tmp_path):
+    reg = DriverRegistry(tmp_path)
+    installed = reg.install(base_url="http://up/v1", model="m", driver=identity_driver())
+
+    class Client:
+        def __init__(self):
+            self.kwargs = None
+
+        def chat_completions(self, messages, tools=None, **kwargs):
+            self.kwargs = kwargs
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+    client = Client()
+    service = ProxyService(ProxyTarget(installed=installed), client=client)  # type: ignore[arg-type]
+    base = {"model": "m", "messages": [{"role": "user", "content": "hello"}]}
+
+    service.chat_completions(dict(base))
+    assert client.kwargs["temperature"] == 0.0
+
+    service.chat_completions({**base, "temperature": 0.7})
+    assert client.kwargs["temperature"] == 0.7
+
+    service.chat_completions({**base, "temperature": None})
+    assert "temperature" in client.kwargs and client.kwargs["temperature"] is None
+
+
 def test_proxy_rejects_wrong_model(tmp_path):
     reg = DriverRegistry(tmp_path)
     installed = reg.install(base_url="http://up/v1", model="m", driver=identity_driver())

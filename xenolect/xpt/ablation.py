@@ -16,6 +16,7 @@ from typing import Any
 
 from xenolect.abi.events import AssistantText, AssistantToolCall, ToolCall, ToolCallBatch
 from xenolect.driver.parse import parse_model_response_full
+from xenolect.eval.termination import assess_g3_termination
 from xenolect.xpt.certify import certify
 from xenolect.xpt.discrimination import (
     request_version_space,
@@ -204,7 +205,22 @@ def run_candidate_only_ablation(
                 final_calls, _, final_text, final_errors = _observe(
                     generation3.response, driver
                 )
-                if final_errors or final_calls or final_text.strip() != instance.ack_value:
+                termination_witness = assess_g3_termination(
+                    final_text=final_text,
+                    expected_sentinel=instance.ack_value,
+                    source_payload=instance.recovery_results()["report"],
+                    unavailable_payloads=(
+                        render_user_turn(instance),
+                        instance.expected_batch_arguments(),
+                        instance.result_for("record_alpha"),
+                        instance.result_for("record_beta"),
+                        instance.gamma_error_text(),
+                        instance.recovery_results()["commit"],
+                    ),
+                    has_tool_calls=bool(final_calls),
+                    parse_errors=tuple(final_errors),
+                )
+                if not termination_witness.protocol_termination_verified:
                     continue
 
                 session.check_can_certify(

@@ -151,7 +151,7 @@ def install_target(
         request_timeout_s=request_timeout_s,
     )
     if compiled.status != "CERTIFIED" or compiled.xpt.driver is None:
-        return InstallReport(
+        result = InstallReport(
             base_url=target.base_url,
             model=target.model,
             status=compiled.status,
@@ -161,6 +161,13 @@ def install_target(
             generations=compiled.xpt.total_generations,
             compile=compiled,
         )
+        result.report_path = registry.write_compile_report(
+            base_url=target.base_url,
+            model=target.model,
+            payload=result.as_dict(),
+            secrets=(api_key,),
+        )
+        return result
 
     installed = registry.install(
         base_url=target.base_url,
@@ -175,31 +182,9 @@ def install_target(
             "driver_grammar_size": driver_grammar_size(),
             "legacy_seed_frontier_size": driver_grammar_size(),
             "online_frontier_size": driver_grammar_size(),
-            "parameterized_protocol_ir": True,
-            "bounded_response_parser_synthesis": True,
-            "typed_partial_hypotheses": True,
-            "reusable_component_evidence": True,
-            "bounded_request_synthesis": True,
-            "bounded_tool_result_synthesis": True,
-            "structural_example_inference": True,
-            "explicit_protocol_version_spaces": True,
-            "controlled_protocol_interventions": True,
-            "behavioral_delta_analysis": True,
-            "property_local_api_rejections": True,
-            "oracle_free_diagnostic_probes": True,
-            "diagnostic_probe_persistent": False,
-            "diagnostic_probe_is_abi_witness": False,
-            "nonce_bound_positive_witnesses": True,
-            "minimax_partition_planning": True,
-            "explicit_identifiability_check": True,
-            "request_version_space": 33,
-            "tool_result_version_space": 3,
-            "target_protocol_required": False,
-            "provider_or_model_identity_used": False,
-            "arbitrary_protocol_synthesis": False,
-            "arbitrary_state_machine_synthesis": False,
         },
         model_fingerprint=target.model_fingerprint,
+        certified_execution_profile=compiled.certified_execution_profile,
     )
     exported = export_driver(installed, export_to) if export_to else None
     result = InstallReport(
@@ -214,7 +199,11 @@ def install_target(
         compile=compiled,
         exported_to=exported,
     )
-    result.report_path = registry.write_report(installed, result.as_dict())
+    result.report_path = registry.write_report(
+        installed,
+        result.as_dict(),
+        secrets=(api_key,),
+    )
     return result
 
 

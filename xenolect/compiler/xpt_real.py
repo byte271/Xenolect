@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from xenolect.certification_profile import (
+    CertifiedExecutionProfile,
+    compiler_execution_profile,
+)
 from xenolect.driver.ir import DRIVER_GRAMMAR_VERSION, driver_grammar_size
 from xenolect.driver.serialize import driver_hash, save_driver
 from xenolect.endpoints.discovery import DiscoveredEndpoint, discover_openai_endpoint
 from xenolect.endpoints.http import OpenAICompatClient
+from xenolect.storage.registry import redact_report_payload
 from xenolect.xpt.planner import load_compiled_program
 from xenolect.xpt.runtime import (
     BUDGET_EXHAUSTED,
@@ -25,6 +30,18 @@ from xenolect.xpt.runtime import (
 from xenolect.xpt.session import Budget
 
 
+def _write_compile_report(
+    report_path: str | Path,
+    payload: dict[str, Any],
+    *,
+    api_key: str | None,
+) -> None:
+    report = Path(report_path)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    redacted = redact_report_payload(payload, secrets=(api_key,))
+    report.write_text(json.dumps(redacted, indent=2), encoding="utf-8")
+
+
 @dataclass
 class RealCompileReport:
     base_url: str
@@ -35,9 +52,16 @@ class RealCompileReport:
     discovery_s: float
     xpt: XptResult
     output_driver: str | None = None
+    certified_execution_profile: CertifiedExecutionProfile = field(
+        default_factory=compiler_execution_profile
+    )
 
     def as_dict(self) -> dict[str, Any]:
+        xpt_payload = self.xpt.as_dict()
+        synthesis = xpt_payload.get("protocol_synthesis") or {}
+        actual_mode = synthesis.get("mode", "bounded_obligation_directed_cegis")
         payload = {
+            "report_schema_version": 2,
             "base_url": self.base_url,
             "model": self.model,
             "status": self.status,
@@ -45,38 +69,58 @@ class RealCompileReport:
             "elapsed_s": self.elapsed_s,
             "discovery_s": self.discovery_s,
             "output_driver": self.output_driver,
+            "certified_execution_profile": self.certified_execution_profile.as_dict(),
             "compiler": {
-                "mode": "bounded_oracle_free_diagnostic_protocol_synthesis",
+                # Backward-readable mode now reflects this run, not the most
+                # advanced feature the binary happens to support.
+                "mode": actual_mode,
+                "execution": {
+                    "mode": actual_mode,
+                    "property_local_rejections_observed": synthesis.get(
+                        "property_local_rejections_observed", 0
+                    ),
+                    "property_local_rejections_used": synthesis.get(
+                        "property_local_rejections_used", 0
+                    ),
+                    "active_discriminating_experiments": synthesis.get(
+                        "active_discriminating_experiments", 0
+                    ),
+                    "oracle_free_probe_count": synthesis.get(
+                        "oracle_free_probe_count", 0
+                    ),
+                },
                 "driver_grammar_version": DRIVER_GRAMMAR_VERSION,
                 "driver_grammar_size": driver_grammar_size(),
                 "legacy_seed_frontier_size": driver_grammar_size(),
                 "online_frontier_size": driver_grammar_size(),
-                "parameterized_protocol_ir": True,
-                "bounded_response_parser_synthesis": True,
-                "typed_partial_hypotheses": True,
-                "reusable_component_evidence": True,
-                "bounded_request_synthesis": True,
-                "bounded_tool_result_synthesis": True,
-                "structural_example_inference": True,
-                "explicit_protocol_version_spaces": True,
-                "controlled_protocol_interventions": True,
-                "behavioral_delta_analysis": True,
-                "property_local_api_rejections": True,
-                "oracle_free_diagnostic_probes": True,
-                "diagnostic_probe_persistent": False,
-                "diagnostic_probe_is_abi_witness": False,
-                "nonce_bound_positive_witnesses": True,
-                "minimax_partition_planning": True,
-                "explicit_identifiability_check": True,
-                "request_version_space": 33,
-                "tool_result_version_space": 3,
-                "target_protocol_required": False,
-                "provider_or_model_identity_used": False,
-                "counterexample_constraints": "nonce_bound_atomic_equalities",
-                "arbitrary_protocol_synthesis": False,
-                "arbitrary_state_machine_synthesis": False,
+                "supported_capabilities": {
+                    "parameterized_protocol_ir": True,
+                    "bounded_response_parser_synthesis": True,
+                    "typed_partial_hypotheses": True,
+                    "reusable_component_evidence": True,
+                    "bounded_request_synthesis": True,
+                    "bounded_tool_result_synthesis": True,
+                    "structural_example_inference": True,
+                    "explicit_protocol_version_spaces": True,
+                    "controlled_protocol_interventions": True,
+                    "behavioral_delta_analysis": True,
+                    "property_local_api_rejections": True,
+                    "oracle_free_diagnostic_probes": True,
+                    "diagnostic_probe_persistent": False,
+                    "diagnostic_probe_is_abi_witness": False,
+                    "nonce_bound_positive_witnesses": True,
+                    "minimax_partition_planning": True,
+                    "explicit_identifiability_check": True,
+                    "request_version_space": 33,
+                    "tool_result_version_space": 3,
+                    "target_protocol_required": False,
+                    "provider_or_model_identity_used": False,
+                    "counterexample_constraints": "nonce_bound_atomic_equalities",
+                    "arbitrary_protocol_synthesis": False,
+                    "arbitrary_state_machine_synthesis": False,
+                },
             },
-            "xpt": self.xpt.as_dict(),
+            "xpt": xpt_payload,
         }
         if self.xpt.driver is not None:
             payload["driver_hash"] = driver_hash(self.xpt.driver)
@@ -129,9 +173,7 @@ def compile_real_endpoint(
             xpt=dummy,
         )
         if report_path is not None:
-            report = Path(report_path)
-            report.parent.mkdir(parents=True, exist_ok=True)
-            report.write_text(json.dumps(result.as_dict(), indent=2), encoding="utf-8")
+            _write_compile_report(report_path, result.as_dict(), api_key=api_key)
         return result
 
     if model and model != "unknown":
@@ -159,19 +201,18 @@ def compile_real_endpoint(
             xpt=dummy,
         )
         if report_path is not None:
-            report = Path(report_path)
-            report.parent.mkdir(parents=True, exist_ok=True)
-            report.write_text(json.dumps(result.as_dict(), indent=2), encoding="utf-8")
+            _write_compile_report(report_path, result.as_dict(), api_key=api_key)
         return result
 
     # One wall-clock epoch for HTTP client + XPT session (absolute deadline_s from
     # compile start). Avoids dual remaining_s that mislabel client timeouts as protocol.
+    execution_profile = compiler_execution_profile()
     client = OpenAICompatClient(
         base_url=discovered.base_url,
         api_key=api_key,
         model=resolved_model,
         timeout=min(request_timeout_s, remaining_after_model),
-        temperature=0.0,
+        temperature=execution_profile.request_defaults["temperature"],
         max_retries=1,
         deadline_s=deadline_s,
         started_at=started,
@@ -226,9 +267,8 @@ def compile_real_endpoint(
         discovery_s=discovery_s,
         xpt=xpt_result,
         output_driver=output_driver,
+        certified_execution_profile=execution_profile,
     )
     if report_path is not None:
-        report = Path(report_path)
-        report.parent.mkdir(parents=True, exist_ok=True)
-        report.write_text(json.dumps(result.as_dict(), indent=2), encoding="utf-8")
+        _write_compile_report(report_path, result.as_dict(), api_key=api_key)
     return result

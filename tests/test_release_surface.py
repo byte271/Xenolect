@@ -16,24 +16,30 @@ def _plain(text: str) -> str:
 
 
 def test_release_version_is_consistent() -> None:
-    assert __version__ == "0.4.0"
+    assert __version__ == "0.5.0"
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.4.0"' in pyproject
+    assert 'version = "0.5.0"' in pyproject
     readme = Path("README.md").read_text(encoding="utf-8")
-    assert readme.startswith("# Xenolect v0.4.0\n")
-    assert "xenolect-0.4.0-py3-none-any.whl" in readme
-    assert "releases/tag/v0.4.0" in readme
+    assert readme.startswith("# Xenolect v0.5.0\n")
+    assert "xenolect-0.5.0-py3-none-any.whl" in readme
+    assert "releases/tag/v0.5.0" in readme
     changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-    assert "## 0.4.0 - 2026-08-09" in changelog
+    assert "## 0.5.0 - 2026-08-09" in changelog
 
 
 def test_release_workflow_is_version_bound_and_guarded() -> None:
     workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
-    assert "startsWith(github.event.head_commit.message, 'Publish Xenolect v')" in workflow
+    assert "workflow_run:" in workflow
+    assert "github.event.workflow_run.conclusion == 'success'" in workflow
+    assert "github.event.workflow_run.event == 'push'" in workflow
+    assert "github.event.workflow_run.head_repository.full_name == github.repository" in workflow
+    assert "github.event.workflow_run.head_branch == 'main'" in workflow
+    assert "ref: ${{ github.event.workflow_run.head_sha }}" in workflow
+    assert 'release_commit_message="$(git log -1 --pretty=%B)"' in workflow
     assert 'tomllib.load(open("pyproject.toml", "rb"))' in workflow
     assert "contents: write" in workflow
     assert 'gh release create "v${VERSION}"' in workflow
-    assert '--target "$GITHUB_SHA"' in workflow
+    assert '--target "$VERIFIED_SHA"' in workflow
     assert "python -m build" in workflow
     assert "Smoke-test wheel" in workflow
 
@@ -71,8 +77,10 @@ def test_release_metadata_declares_three_supported_desktop_platforms() -> None:
     assert "Operating System :: POSIX :: Linux" in pyproject
 
 
-def test_readme_is_truthful_about_finite_driver_grammar() -> None:
+def test_user_and_certification_docs_state_the_bounded_product_boundary() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
-    assert "144 representable Driver programs" in readme
-    assert "does not synthesize arbitrary" in readme
-    assert "does not invent application tools" in readme
+    certification = Path("docs/CERTIFICATION.md").read_text(encoding="utf-8")
+    assert "universal or arbitrary protocol synthesis" in readme
+    assert "automatic creation or execution of application tools" in readme
+    assert "Driver IR remains v0.2" in certification
+    assert "does not add provider rules" in certification

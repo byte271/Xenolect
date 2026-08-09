@@ -353,6 +353,9 @@ def test_non_cooperative_multi_seed_holdout_sweep() -> None:
 
         report = result.as_dict()["protocol_synthesis"]
         assert report["mode"] == "bounded_active_discriminating_synthesis"
+        assert report["property_local_fault_localization_used"] is True
+        assert report["property_local_rejections_observed"] > 0
+        assert report["property_local_rejections_used"] > 0
         assert len(report["version_spaces"]) == 2
         assert {space["component"] for space in report["version_spaces"]} == {
             "request",

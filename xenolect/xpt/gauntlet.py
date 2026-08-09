@@ -6,7 +6,7 @@ trajectory:
 
     G1  structured multi-call challenge      OB01..OB09, OB17
     G2  hidden-result + ToolError challenge  OB10..OB14
-    G3  no-call / termination challenge      OB15, OB16
+    G3  nonce-bound no-call termination      OB15, OB16
     (whole trace)                            OB18
 
 G2 deliberately merges the tool-result and the ToolError challenge: two of the

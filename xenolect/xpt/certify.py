@@ -20,19 +20,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from xenolect.xpt.gauntlet import (
-    BATCH_TOOLS,
-    RECOVERY_TOOLS,
-    GauntletInstance,
-    gauntlet_tools,
-    render_user_turn,
-)
-from xenolect.xpt.obligations import (
-    CoverageCertificate,
-    ObligationEvidence,
-    ObligationStatus,
-)
-from xenolect.xpt.syndrome import build_syndrome, sha
 from xenolect.abi.events import (
     AssistantText,
     AssistantToolCall,
@@ -49,6 +36,20 @@ from xenolect.driver.runtime import DriverRuntime
 from xenolect.driver.termination import Termination
 from xenolect.eval.evaluator import ProbeExpectation, ResultDependency, evaluate_trace
 from xenolect.eval.schema import validate_tool_arguments
+from xenolect.eval.termination import assess_event_g3_termination
+from xenolect.xpt.gauntlet import (
+    BATCH_TOOLS,
+    RECOVERY_TOOLS,
+    GauntletInstance,
+    gauntlet_tools,
+    render_user_turn,
+)
+from xenolect.xpt.obligations import (
+    CoverageCertificate,
+    ObligationEvidence,
+    ObligationStatus,
+)
+from xenolect.xpt.syndrome import build_syndrome, sha
 
 
 @dataclass
@@ -79,7 +80,9 @@ def certification_expectation(inst: GauntletInstance) -> ProbeExpectation:
         require_parallel_batch=True,
         min_tool_cycles=2,
         require_final_text=True,
-        expected_final_text=inst.ack_value,
+        expected_final_sentinel=inst.ack_value,
+        final_sentinel_source_tool="report",
+        diagnostic_expected_final_text=inst.ack_value,
         result_dependencies=[
             ResultDependency(
                 source_tool="record_alpha",
@@ -346,22 +349,6 @@ def certify(
         "a valid parallel recovery turn follows the ToolError",
     )
 
-    # ---- OB15 / OB16 no-call + termination --------------------------------
-    final = _final_text(events)
-    record(
-        "OB15",
-        len(turns) == 2,
-        3,
-        f"no spurious tool turn after the recovery results ({len(turns)} tool turns total)",
-    )
-    record(
-        "OB16",
-        final is not None and final.strip() == inst.ack_value,
-        3,
-        f"final assistant text equals the post-prompt ack sentinel (observed {final!r})",
-    )
-
-    # ---- OB17 unambiguous parse -------------------------------------------
     ambiguous = []
     for i, w in enumerate(wire):
         raw = w.get("response")
@@ -370,6 +357,35 @@ def certify(
         syn = build_syndrome(raw)
         if syn.consensus.value == "ambiguous":
             ambiguous.append(i + 1)
+
+    # ---- OB15 / OB16 no-call + termination --------------------------------
+    final = _final_text(events)
+    record(
+        "OB15",
+        len(turns) == 2,
+        3,
+        f"no spurious tool turn after the recovery results ({len(turns)} tool turns total)",
+    )
+    termination_witness = assess_event_g3_termination(
+        events,
+        expected_sentinel=inst.ack_value,
+        source_tool="report",
+        parser_ambiguous=bool(ambiguous),
+        parse_errors=tuple(run.parse_errors),
+        normal_termination=run.termination == Termination.COMPLETED,
+    )
+    record(
+        "OB16",
+        termination_witness.protocol_termination_verified,
+        3,
+        (
+            "final assistant turn contains one exclusive post-result ack sentinel "
+            f"with normal no-call termination (observed {final!r})"
+        ),
+        termination_witness=termination_witness.as_dict(),
+    )
+
+    # ---- OB17 unambiguous parse -------------------------------------------
     record(
         "OB17",
         not ambiguous,

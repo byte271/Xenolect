@@ -514,6 +514,8 @@ class ProtocolSynthesisReport:
     failure: str | None = None
     failure_class: str | None = None
     certification: dict[str, Any] | None = None
+    property_local_rejections_observed: int = 0
+    property_local_rejections_used: int = 0
 
     def record_experiment(self, experiment: PlannedExperiment) -> None:
         self.experiments.append(experiment.as_dict())
@@ -577,7 +579,14 @@ class ProtocolSynthesisReport:
             "claim": claim,
             "arbitrary_protocol_synthesis": False,
             "state_synthesis": False,
-            "property_local_fault_localization_used": not self.oracle_free,
+            # Backward-readable alias with corrected semantics.
+            "property_local_fault_localization_used": (
+                self.property_local_rejections_used > 0
+            ),
+            "property_local_rejections_observed": self.property_local_rejections_observed,
+            "property_local_rejections_used": self.property_local_rejections_used,
+            "active_discriminating_experiments": len(self.experiments),
+            "oracle_free_probe_count": len(self.probe_plans),
             "diagnostic_probe_is_production_driver": False,
             "experiments": list(self.experiments),
             "probe_plans": list(self.probe_plans),

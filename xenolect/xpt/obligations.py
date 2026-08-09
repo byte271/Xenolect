@@ -144,10 +144,10 @@ OBLIGATIONS: tuple[Obligation, ...] = (
     ),
     Obligation(
         "OB16",
-        "termination with final text",
+        "nonce-bound final-text termination",
         True,
         ("parser",),
-        "evaluator.require_final_text + abi.trace CHAT terminal",
+        "eval.termination fresh-sentinel witness + abi.trace CHAT terminal",
     ),
     Obligation(
         "OB17",
