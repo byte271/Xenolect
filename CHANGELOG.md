@@ -31,7 +31,8 @@ This milestone proves one narrow claim: XPT can synthesize and independently cer
 
 - Preserved v0.1 Driver JSON serialization and content-hash identity and retained v0.2 Driver compatibility.
 - Kept the 300-second wall-clock limit, 12-generation budget, and three-generation independent-certification reserve.
-- Verified 122 tests and all six Windows, macOS, and Linux jobs on Python 3.11 and 3.13 before release.
+- Added a guarded release workflow that derives the version from package metadata, builds and smoke-tests the artifacts, and publishes the matching GitHub tag and release only from an explicit release commit on `main`.
+- Verified 123 tests and all six Windows, macOS, and Linux jobs on Python 3.11 and 3.13 before release.
 
 ## 0.2.0 - 2026-08-08
 

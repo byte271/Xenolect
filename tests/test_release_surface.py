@@ -22,8 +22,20 @@ def test_release_version_is_consistent() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
     assert readme.startswith("# Xenolect v0.3.0\n")
     assert "xenolect-0.3.0-py3-none-any.whl" in readme
+    assert "releases/tag/v0.3.0" in readme
     changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
     assert "## 0.3.0 - 2026-08-09" in changelog
+
+
+def test_release_workflow_is_version_bound_and_guarded() -> None:
+    workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+    assert "startsWith(github.event.head_commit.message, 'Publish Xenolect v')" in workflow
+    assert 'tomllib.load(open("pyproject.toml", "rb"))' in workflow
+    assert "contents: write" in workflow
+    assert 'gh release create "v${VERSION}"' in workflow
+    assert '--target "$GITHUB_SHA"' in workflow
+    assert "python -m build" in workflow
+    assert "Smoke-test wheel" in workflow
 
 
 def test_normal_cli_surface_does_not_expose_internal_commands() -> None:
