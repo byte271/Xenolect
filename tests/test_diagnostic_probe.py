@@ -124,11 +124,21 @@ def test_request_probe_plan_is_bounded_deterministic_and_auditable() -> None:
     assert sorted(members) == sorted(version.fingerprint for version in versions)
     assert len(members) == len(set(members))
     wire = json.dumps(first_probe.wire(), sort_keys=True)
-    assert "XPT_PROBE" not in wire
-    assert '"diagnostic"' not in wire
-    assert '"probe_id"' not in wire
-    assert '"partition_id"' not in wire
-    assert "outcome-" not in wire
+    assert all(
+        marker not in wire.lower()
+        for marker in (
+            "xpt_probe",
+            "diagnostic",
+            "diag_req_",
+            "probe_id",
+            "partition_id",
+            "outcome-",
+            "probe_value",
+            "probe_result",
+            "reply_call_id",
+            "pw_",
+        )
+    )
     assert all(version.fingerprint not in wire for version in versions)
     assert all(version.fingerprint[:8] not in wire for version in versions)
     assert all(
@@ -194,7 +204,21 @@ def test_result_probe_exhaustively_selects_all_three_versions() -> None:
     assert len(tokens) == len(set(tokens))
     wire = json.dumps(probe.wire(), sort_keys=True)
     assert all(version.fingerprint not in wire for version in results)
-    assert "probe_id" not in wire and "outcome-" not in wire
+    assert all(
+        marker not in wire.lower()
+        for marker in (
+            "xpt_probe",
+            "diagnostic",
+            "diag_req_",
+            "probe_id",
+            "partition_id",
+            "outcome-",
+            "probe_value",
+            "probe_result",
+            "reply_call_id",
+            "pw_",
+        )
+    )
     drivers = candidate_drivers_for_probe((request_version,))
     for alternative in probe.alternatives:
         witness = alternative.witness

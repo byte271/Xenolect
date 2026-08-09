@@ -497,17 +497,17 @@ def _mint_witnesses(
         if component == ProtocolComponent.REQUEST:
             witness = ProbeWitness(
                 witness_id="pw_" + token,
-                tool_name="diag_req_" + token,
-                arguments={"probe_value": "arg_" + token},
-                call_id="call_req_" + token,
+                tool_name="submit_" + token,
+                arguments={"value": "value_" + token},
+                call_id="call_" + token,
             )
         else:
-            sentinel = "result_" + token
+            sentinel = "receipt_" + token
             witness = ProbeWitness(
                 witness_id="pw_" + token,
                 tool_name="report",
                 arguments={"code": sentinel},
-                call_id="call_result_" + token,
+                call_id="followup_" + token,
                 result_sentinel=sentinel,
             )
         for value in witness.tokens():
@@ -615,15 +615,15 @@ def build_request_probe(
             parameters={
                 "type": "object",
                 "properties": {
-                    "probe_value": {
-                        "$ref": "#/$defs/ProbeValue",
+                    "value": {
+                        "$ref": "#/$defs/PayloadValue",
                     }
                 },
-                "required": ["probe_value"],
+                "required": ["value"],
                 "$defs": {
-                    "ProbeValue": {
+                    "PayloadValue": {
                         "type": "string",
-                        "const": witness.arguments["probe_value"],
+                        "const": witness.arguments["value"],
                     }
                 },
             },
@@ -658,7 +658,7 @@ def build_request_probe(
             "role": "user",
             "content": (
                 "Use exactly one compatible tool catalog. Call its only function once, "
-                "copy the schema's required probe_value exactly, and use the call id "
+                "copy the schema's required value exactly, and use the call id "
                 "stated in that function description. Return a structured tool call."
             ),
         }
@@ -701,8 +701,8 @@ def build_result_probe(
         witness = witnesses[outcome_index]
         driver = _resolved_driver(request_version, version)
         content = {
-            "probe_result": witness.result_sentinel,
-            "reply_call_id": witness.call_id,
+            "code": witness.result_sentinel,
+            "next_call_id": witness.call_id,
         }
         message = encode_tool_result_message(
             ToolResult(call_id=call.id, name=call.name, content=content),
@@ -727,7 +727,7 @@ def build_result_probe(
             "role": "user",
             "content": (
                 "Consume the one compatible result representation. Call report with "
-                "code equal to its exact probe_result value and use its reply_call_id. "
+                "code equal to its exact code value and use its next_call_id. "
                 "Return a structured tool call; do not repeat the value as plain text."
             ),
         }

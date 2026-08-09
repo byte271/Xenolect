@@ -61,6 +61,19 @@ def _const_value(value: Any) -> str | None:
     return None
 
 
+def _required_field(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    required = value.get("required")
+    if (
+        isinstance(required, list)
+        and len(required) == 1
+        and isinstance(required[0], str)
+    ):
+        return required[0]
+    return None
+
+
 class OracleFreeEndpoint:
     """A deterministic endpoint whose validator consumes normal wire data only."""
 
@@ -293,20 +306,20 @@ class OracleFreeEndpoint:
         # This is ordinary instruction following over catalog schemas and consumed
         # result bodies. It has no access to XPT metadata or a reference Driver.
         if consumed:
-            probe_bodies = [
+            continuation_bodies = [
                 item["body"]
                 for item in consumed
                 if isinstance(item.get("body"), dict)
-                and isinstance(item["body"].get("probe_result"), str)
-                and isinstance(item["body"].get("reply_call_id"), str)
+                and isinstance(item["body"].get("code"), str)
+                and isinstance(item["body"].get("next_call_id"), str)
             ]
-            if len(probe_bodies) == 1:
-                body = probe_bodies[0]
+            if len(continuation_bodies) == 1:
+                body = continuation_bodies[0]
                 return self._calls(
                     catalog,
-                    [("report", {"code": body["probe_result"]}, body["reply_call_id"])],
+                    [("report", {"code": body["code"]}, body["next_call_id"])],
                 )
-            if len(probe_bodies) > 1:
+            if len(continuation_bodies) > 1:
                 return self._plain("ambiguous result representations")
 
             material = json.dumps(consumed, sort_keys=True)
@@ -323,25 +336,26 @@ class OracleFreeEndpoint:
                         (
                             "commit",
                             {"alpha": alpha[-1], "beta": beta[-1]},
-                            "oracle-recovery-1",
+                            "recovery-1",
                         ),
-                        ("report", {"code": errors[-1]}, "oracle-recovery-2"),
+                        ("report", {"code": errors[-1]}, "recovery-2"),
                     ],
                 )
 
         if len(catalog.tools) == 1:
             tool = catalog.tools[0]
             value = _const_value(tool["schema"])
+            field = _required_field(tool["schema"])
             call_id_match = re.search(
                 r"use call id (\S+)", str(tool.get("description", ""))
             )
-            if value is not None and call_id_match is not None:
+            if value is not None and field is not None and call_id_match is not None:
                 return self._calls(
                     catalog,
                     [
                         (
                             tool["name"],
-                            {"probe_value": value},
+                            {field: value},
                             call_id_match.group(1),
                         )
                     ],
@@ -352,7 +366,7 @@ class OracleFreeEndpoint:
             return self._calls(
                 catalog,
                 [
-                    (name, arguments[name], f"oracle-initial-{index}")
+                    (name, arguments[name], f"initial-{index}")
                     for index, name in enumerate(
                         ("record_alpha", "record_beta", "record_gamma"), start=1
                     )
