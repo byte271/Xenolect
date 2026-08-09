@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Repository maintenance
+
+- After successful CI on `main`, repository automation removes only `agent/*`
+  branches whose current HEAD exactly matches the head SHA of a merged pull request
+  and which have no open pull request. The default branch, tags, active work, and
+  unmerged branch heads are excluded.
+
 ## 0.5.0 - 2026-08-09
 
 ### Reliability and certification semantics
