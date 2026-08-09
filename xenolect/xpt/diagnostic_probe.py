@@ -74,12 +74,9 @@ class ProbeWitness:
         )
 
     def tokens(self) -> tuple[str, ...]:
-        # ``report`` is the public recovery operation used by result probes;
-        # the branch-exclusive result sentinel and reply call ID are the fresh
-        # canaries in that family. Request probes also mint a fresh tool name.
+        # ``report`` is the same ordinary operation in both probe families.
+        # Only opaque argument, result, and call-ID values are fresh canaries.
         values = [self.call_id]
-        if self.result_sentinel is None:
-            values.append(self.tool_name)
         values.extend(str(value) for value in self.arguments.values())
         if self.result_sentinel is not None:
             values.append(self.result_sentinel)
@@ -497,17 +494,19 @@ def _mint_witnesses(
         if component == ProtocolComponent.REQUEST:
             witness = ProbeWitness(
                 witness_id="pw_" + token,
-                tool_name="submit_" + token,
-                arguments={"value": "value_" + token},
-                call_id="call_" + token,
+                tool_name="report",
+                arguments={
+                    "code": _hash({"token": token, "slot": "argument"}, 16)
+                },
+                call_id=_hash({"token": token, "slot": "call-id"}, 20),
             )
         else:
-            sentinel = "receipt_" + token
+            sentinel = _hash({"token": token, "slot": "result"}, 16)
             witness = ProbeWitness(
                 witness_id="pw_" + token,
                 tool_name="report",
                 arguments={"code": sentinel},
-                call_id="followup_" + token,
+                call_id=_hash({"token": token, "slot": "followup-id"}, 20),
                 result_sentinel=sentinel,
             )
         for value in witness.tokens():
@@ -615,15 +614,15 @@ def build_request_probe(
             parameters={
                 "type": "object",
                 "properties": {
-                    "value": {
-                        "$ref": "#/$defs/PayloadValue",
+                    "code": {
+                        "$ref": "#/$defs/Code",
                     }
                 },
-                "required": ["value"],
+                "required": ["code"],
                 "$defs": {
-                    "PayloadValue": {
+                    "Code": {
                         "type": "string",
-                        "const": witness.arguments["value"],
+                        "const": witness.arguments["code"],
                     }
                 },
             },
@@ -658,7 +657,7 @@ def build_request_probe(
             "role": "user",
             "content": (
                 "Use exactly one compatible tool catalog. Call its only function once, "
-                "copy the schema's required value exactly, and use the call id "
+                "copy the schema's required code exactly, and use the call id "
                 "stated in that function description. Return a structured tool call."
             ),
         }

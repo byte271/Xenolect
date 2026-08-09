@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from itertools import combinations
 from typing import Any
 
@@ -137,8 +138,13 @@ def test_request_probe_plan_is_bounded_deterministic_and_auditable() -> None:
             "probe_result",
             "reply_call_id",
             "pw_",
+            '"submit_',
+            '"value_',
+            '"followup_',
+            '"receipt_',
         )
     )
+    assert re.search(r"(?<![a-z_])call_[0-9a-f]{8,}", wire.lower()) is None
     assert all(version.fingerprint not in wire for version in versions)
     assert all(version.fingerprint[:8] not in wire for version in versions)
     assert all(
@@ -217,8 +223,13 @@ def test_result_probe_exhaustively_selects_all_three_versions() -> None:
             "probe_result",
             "reply_call_id",
             "pw_",
+            '"submit_',
+            '"value_',
+            '"followup_',
+            '"receipt_',
         )
     )
+    assert re.search(r"(?<![a-z_])call_[0-9a-f]{8,}", wire.lower()) is None
     drivers = candidate_drivers_for_probe((request_version,))
     for alternative in probe.alternatives:
         witness = alternative.witness
