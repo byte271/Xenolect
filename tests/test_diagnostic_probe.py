@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from itertools import combinations
 from typing import Any
 
@@ -163,6 +164,29 @@ def test_request_probe_plan_is_bounded_deterministic_and_auditable() -> None:
         )
     )
 
+    cleaned_probe = replace(
+        first_probe,
+        messages=first_probe.messages
+        + (
+            {
+                "role": "user",
+                "content": {"safe": "visible", "_xpt_nested": "bookkeeping"},
+                "_xpt_message": "bookkeeping",
+            },
+        ),
+    )
+    cleaned_wire = json.dumps(cleaned_probe.wire(), sort_keys=True)
+    assert "visible" in cleaned_wire
+    assert "_xpt_nested" not in cleaned_wire
+    assert "_xpt_message" not in cleaned_wire
+
+    with pytest.raises(ValueError, match="metadata cannot enter"):
+        replace(
+            first_probe,
+            messages=first_probe.messages
+            + ({"role": "user", "content": {"nested": {"probe_id": "leak"}}},),
+        )
+
 
 def test_every_request_version_is_identified_by_the_two_probe_strategy() -> None:
     universe = request_version_space()
@@ -275,12 +299,16 @@ def test_result_probe_exhaustively_selects_all_three_versions() -> None:
 
 
 def test_default_budget_reserves_clean_trace_and_certification() -> None:
+    budget = Budget()
     initial_generic_candidate = 1
     diagnostic_turns = MAX_REQUEST_PROBES + MAX_RESULT_PROBES
     clean_diagnosis = 3
     diagnosis_upper_bound = initial_generic_candidate + diagnostic_turns + clean_diagnosis
     assert diagnosis_upper_bound == 7
-    assert diagnosis_upper_bound <= 12 - 3
+    assert (
+        diagnosis_upper_bound
+        <= budget.max_generations - budget.certification_reserve
+    )
 
 
 def test_diagnostic_evidence_refines_components_but_never_proves_obligations() -> None:

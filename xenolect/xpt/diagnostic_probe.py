@@ -242,19 +242,48 @@ class DiagnosticProbe:
         alternatives = [alternative.hypothesis_fingerprint for alternative in self.alternatives]
         if sorted(members) != sorted(alternatives) or len(set(members)) != len(members):
             raise ValueError("probe partitions must cover every alternative exactly once")
-        forbidden = {"XPT_PROBE", "diagnostic", "probe_id", "partition_id"}
-        wire_keys = {
-            str(key)
-            for message in self.messages
-            for key in message
-        } | {str(key) for tool in self.tools for key in tool}
-        if forbidden.intersection(wire_keys):
+        raw_wire = {"messages": self.messages, "tools": self.tools}
+        serialized_wire = json.dumps(
+            raw_wire, sort_keys=True, separators=(",", ":"), default=str
+        ).casefold()
+        forbidden = {
+            "xpt_probe",
+            "diagnostic",
+            "probe_id",
+            "partition_id",
+            "expected_partition",
+            "outcome-",
+            self.probe_id.casefold(),
+            self.nonce.casefold(),
+            *(
+                value.casefold()
+                for alternative in self.alternatives
+                for value in (
+                    alternative.alternative_id,
+                    alternative.hypothesis_fingerprint,
+                    alternative.hypothesis_fingerprint[:8],
+                )
+            ),
+            *(
+                value.casefold()
+                for partition in self.partitions
+                for value in (partition.outcome_key, partition.witness.witness_id)
+            ),
+            "messages.role",
+            "catalog.container_depth",
+            "tools.schema_projection",
+            "assistant.call_frame",
+            "assistant.call_fields",
+            "messages.result_role",
+            "messages.tool_call_id",
+        }
+        if any(token and token in serialized_wire for token in forbidden):
             raise ValueError("diagnostic metadata cannot enter the endpoint wire")
 
     def wire(self) -> dict[str, Any]:
         return {
-            "messages": [dict(message) for message in self.messages],
-            "tools": [dict(tool) for tool in self.tools] or None,
+            "messages": _clean_wire_value(self.messages),
+            "tools": _clean_wire_value(self.tools) or None,
             "seed": None,
         }
 
@@ -323,6 +352,7 @@ class _PartitionCandidate:
     assignment: tuple[tuple[str, int], ...]
     worst_case: int
     information_score: float
+    estimated_generations: int
     estimated_wire_size: int
     complexity: int
     fingerprint: str
@@ -331,6 +361,19 @@ class _PartitionCandidate:
 def _hash(value: Any, length: int = 16) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return hashlib.sha256(encoded).hexdigest()[:length]
+
+
+def _clean_wire_value(value: Any) -> Any:
+    """Recursively remove encoder bookkeeping fields from endpoint-visible wire."""
+    if isinstance(value, dict):
+        return {
+            key: _clean_wire_value(item)
+            for key, item in value.items()
+            if not str(key).startswith("_")
+        }
+    if isinstance(value, (list, tuple)):
+        return [_clean_wire_value(item) for item in value]
+    return value
 
 
 def _partition_information(sizes: Iterable[int]) -> float:
@@ -431,6 +474,7 @@ def _partition_candidates(
                 assignment=remapped,
                 worst_case=max(sizes),
                 information_score=_partition_information(sizes),
+                estimated_generations=1,
                 estimated_wire_size=estimated_wire_size,
                 complexity=len(groups),
                 fingerprint=fingerprint,
@@ -442,7 +486,7 @@ def _partition_candidates(
             key=lambda candidate: (
                 candidate.worst_case,
                 -candidate.information_score,
-                1,
+                candidate.estimated_generations,
                 candidate.estimated_wire_size,
                 candidate.complexity,
                 candidate.fingerprint,

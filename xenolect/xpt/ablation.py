@@ -24,7 +24,7 @@ from xenolect.xpt.discrimination import (
 from xenolect.xpt.frontier import CERTIFICATION_GENERATION_UPPER_BOUND
 from xenolect.xpt.gauntlet import RECOVERY_TOOLS, gauntlet_tools, mint_instance, render_user_turn
 from xenolect.xpt.hypothesis import ProtocolComponent
-from xenolect.xpt.session import Budget, BudgetExhausted, XptSession
+from xenolect.xpt.session import Budget, BudgetExhausted, DeadlineExceeded, XptSession
 
 
 @dataclass(frozen=True)
@@ -231,7 +231,7 @@ def run_candidate_only_ablation(
                         else "candidate passed diagnosis but failed certification"
                     ),
                 )
-    except BudgetExhausted as exc:
+    except (BudgetExhausted, DeadlineExceeded) as exc:
         return CandidateOnlyRun(
             certification_success=False,
             diagnosis_generations=session.ledger.generation_count,
