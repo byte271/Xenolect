@@ -115,7 +115,11 @@ def install_target(
             )
         except RegistryError:
             cached = None
-        if cached is not None and cached.model_fingerprint is not None and target.model_fingerprint is None:
+        if (
+            cached is not None
+            and cached.model_fingerprint is not None
+            and target.model_fingerprint is None
+        ):
             cached = None
         if cached is not None:
             exported = export_driver(cached, export_to) if export_to else None
@@ -169,9 +173,16 @@ def install_target(
             "seed": seed,
             "driver_grammar_version": DRIVER_GRAMMAR_VERSION,
             "driver_grammar_size": driver_grammar_size(),
+            "legacy_seed_frontier_size": driver_grammar_size(),
             "online_frontier_size": driver_grammar_size(),
             "parameterized_protocol_ir": True,
             "bounded_response_parser_synthesis": True,
+            "typed_partial_hypotheses": True,
+            "reusable_component_evidence": True,
+            "bounded_request_synthesis": True,
+            "bounded_tool_result_synthesis": True,
+            "structural_example_inference": True,
+            "arbitrary_protocol_synthesis": False,
             "arbitrary_state_machine_synthesis": False,
         },
         model_fingerprint=target.model_fingerprint,

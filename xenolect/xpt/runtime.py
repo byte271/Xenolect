@@ -1,13 +1,16 @@
 """XPT online runtime: diagnose an unknown endpoint, synthesize a driver, certify it.
 
-Phase order and what each phase is allowed to cost:
+The compatibility seed path still walks the precompiled v0.1 request frontier.
+When a rejected wire exposes bounded nonce-bound structural evidence, the active
+path instead performs:
 
-    1  request-configuration diagnosis   walks the precompiled decision DAG
-    2  parser resolution                 FREE (local, multi-parser, no generation)
-    3  stateful trajectory G2/G3         continues the successful G1 branch
-    4  tool-result-encoding resolution   counterfactual fork at the G1 state
-    5  synthesis                         FREE
-    6  independent certification         production runtime + production evaluator
+    1  partial request hypothesis        infer parameters locally; test only role
+    2  response primitive synthesis      FREE over the successful paid G1 bytes
+    3  partial result hypothesis         infer segments locally; test only placement
+    4  unchanged G2/G3 validation        component-isolated counterexample refinement
+    5  independent certification         production runtime + production evaluator
+
+The active and legacy paths share the same hard generation/deadline accounting.
 
 The algorithm never sees a model name, a provider name, an endpoint type, a
 candidate id or a reference answer. Its only input is observable values returned
@@ -21,17 +24,26 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from xenolect.abi.events import AssistantText, AssistantToolCall, ToolCall, ToolCallBatch
+from xenolect.abi.events import (
+    AssistantText,
+    AssistantToolCall,
+    ToolCall,
+    ToolCallBatch,
+    ToolResult,
+)
 from xenolect.driver.ir import (
     Driver,
     NativeToolCallsParser,
     ParserKind,
     ProtocolProgram,
     ResponsePrimitive,
+    ResultField,
     SchemaTransform,
     ToolEncoding,
     ToolResultEncoding,
+    ToolResultMessage,
     composed_driver,
+    effective_protocol,
 )
 from xenolect.driver.parse import parse_model_response_full
 from xenolect.driver.termination import Termination
@@ -49,6 +61,13 @@ from xenolect.xpt.gauntlet import (
     gauntlet_tools,
     mint_instance,
 )
+from xenolect.xpt.hypothesis import (
+    ContradictionClass,
+    ObligationDirectedPlanner,
+    PartialProtocolHypothesis,
+    ProtocolComponent,
+    ProtocolSynthesisReport,
+)
 from xenolect.xpt.obligations import CoverageCertificate
 from xenolect.xpt.planner import (
     DiagnosticProgram,
@@ -59,6 +78,20 @@ from xenolect.xpt.planner import (
     observation_class,
     probe_payload,
     probe_succeeded,
+)
+from xenolect.xpt.protocol_synthesis import (
+    WitnessPhase,
+    component_observation_evidence,
+    counterexample_evidence,
+    discover_request_program_from_example,
+    discover_tool_result_program_from_example,
+    evidence_from_counterexample,
+    extract_counterexample,
+    negative_behavior_evidence,
+    obligation_support_evidence,
+    obligation_witness_evidence,
+    synthesize_request_program,
+    synthesize_tool_result_program,
 )
 from xenolect.xpt.response_discovery import discover_response_parser
 from xenolect.xpt.session import (
@@ -99,6 +132,7 @@ class XptResult:
     #: Retained for diagnostics because short and large generations have very
     #: different latency profiles.
     io_sizes: list[tuple[int, int]] = field(default_factory=list)
+    synthesis_report: ProtocolSynthesisReport | None = None
 
     @property
     def total_generations(self) -> int:
@@ -118,6 +152,9 @@ class XptResult:
             "left_compiled_dag": self.left_compiled_dag,
             "equivalent_parsers": list(self.equivalent_parsers),
             "io_sizes": [list(x) for x in self.io_sizes],
+            "protocol_synthesis": (
+                self.synthesis_report.as_dict() if self.synthesis_report is not None else None
+            ),
         }
 
 
@@ -129,6 +166,7 @@ class _Trajectory:
     config: RequestConfig
     syndrome: Syndrome
     frozen_prefix: str
+    active_hypothesis: PartialProtocolHypothesis | None = None
 
 
 def _driver_from(
@@ -214,10 +252,46 @@ class XptCompiler:
         self.seed = seed
         self.diag_inst = mint_instance(seed=seed, salt="diagnose", surface_form="A")
         self.left_dag = False
+        self.obligation_planner = ObligationDirectedPlanner()
+        self.synthesis_report = ProtocolSynthesisReport()
+        self._active_counterexample_seen = False
+        self._active_failure: str | None = None
 
     # ------------------------------------------------------------------
     # phase 1: request configuration
     # ------------------------------------------------------------------
+
+    def _discover_paid_response(
+        self,
+        syn: Syndrome,
+        generation: Generation,
+        *,
+        offered_names: set[str],
+        expected: dict[str, dict[str, Any]],
+        label: str,
+    ) -> None:
+        """Reuse one paid response for bounded local parser synthesis."""
+        if syn.consensus != ParseConsensus.NONE or not isinstance(generation.response, dict):
+            return
+        discovery = discover_response_parser(
+            generation.response,
+            offered_tool_names=offered_names,
+            expected_arguments=expected,
+        )
+        apply_discovered_response(
+            syn,
+            parser=discovery.parser,
+            calls=discovery.calls,
+            error=discovery.error,
+            offered_tool_names=offered_names,
+        )
+        generation.syndrome = syn.as_dict()
+        if discovery.ok:
+            self.session.ledger.note(
+                "response discovery synthesized and locally validated "
+                f"{discovery.parser.op!r} from the paid {label} observation "
+                f"({discovery.candidates_validated} agreeing candidate(s))"
+            )
 
     def _run_template(self, probe: ProbeTemplate) -> tuple[Syndrome, Branch, bool]:
         tools, content, expected = probe_payload(probe, self.diag_inst)
@@ -230,39 +304,287 @@ class XptCompiler:
             reason=self._reason,
             offered_tool_names=offered_names,
         )
-        if (
-            syn.consensus == ParseConsensus.NONE
-            and isinstance(generation.response, dict)
-        ):
-            discovery = discover_response_parser(
-                generation.response,
-                offered_tool_names=offered_names,
-                expected_arguments=expected,
-            )
-            apply_discovered_response(
-                syn,
-                parser=discovery.parser,
-                calls=discovery.calls,
-                error=discovery.error,
-                offered_tool_names=offered_names,
-            )
-            generation.syndrome = syn.as_dict()
-            if discovery.ok:
-                self.session.ledger.note(
-                    "response discovery synthesized and locally validated "
-                    f"{discovery.parser.op!r} from the paid {probe.id} observation "
-                    f"({discovery.candidates_validated} agreeing candidate(s))"
-                )
+        self._discover_paid_response(
+            syn,
+            generation,
+            offered_names=offered_names,
+            expected=expected,
+            label=probe.id,
+        )
         annotate_arguments(syn, tools, expected)
         ok = probe_succeeded(syn, expected, batch=probe.kind == "gauntlet_turn1")
         return syn, branch, ok
+
+    def _provisional_request_driver(self, hypothesis: PartialProtocolHypothesis) -> Driver:
+        """Execute a resolved request while response/result remain typed holes."""
+        if not isinstance(hypothesis.request, tuple):
+            raise ValueError("request experiment requires a resolved request program")
+        return Driver(
+            ir_version="0.2",
+            schema_transforms=list(hypothesis.schema_transforms),
+            protocol=ProtocolProgram(
+                request=list(hypothesis.request),
+                response=[NativeToolCallsParser()],
+                tool_result=ToolResultMessage(
+                    role="tool",
+                    segments=[ResultField(field="content")],
+                    attach_tool_call_id=True,
+                ),
+            ),
+        )
+
+    def _maybe_active_request_trajectory(
+        self,
+        probe: ProbeTemplate,
+        branch: Branch,
+        *,
+        succeeded: bool,
+    ) -> tuple[_Trajectory | None, bool]:
+        """Refine a request hole from a nonce-bound example or counterexample.
+
+        Structural examples are preferred: catalog nesting/fields and call
+        framing/fields are inferred locally, while the unobservable message
+        role remains a two-value typed choice.  The explicit atomic constraint
+        object remains a strict alternative.  ``claimed`` means one of those
+        shapes was recognized; malformed or ambiguous evidence then fails
+        closed instead of being treated as ordinary model prose.
+        """
+        if succeeded or self._active_counterexample_seen:
+            return None, False
+        generation = branch.last_generation
+        if generation is None:
+            return None, False
+        tools, content, expected = probe_payload(probe, self.diag_inst)
+        structural = discover_request_program_from_example(
+            generation.response,
+            tools=tools,
+            expected_nonce=self.diag_inst.alpha_code,
+        )
+        request_programs: tuple[tuple[Any, ...], ...]
+        if structural.ok:
+            assert structural.observation is not None
+            observation = structural.observation
+            request_programs = structural.candidates
+        elif structural.found:
+            self._active_counterexample_seen = True
+            self.left_dag = True
+            self._active_failure = structural.error or "invalid request example"
+            self.synthesis_report.failure = self._active_failure
+            return None, True
+        else:
+            observation = extract_counterexample(
+                generation.response,
+                expected_component=ProtocolComponent.REQUEST,
+                expected_nonce=self.diag_inst.alpha_code,
+            )
+            if not observation.found:
+                return None, False
+            if observation.ok:
+                try:
+                    request_programs = (synthesize_request_program(observation),)
+                except ValueError as exc:
+                    self._active_counterexample_seen = True
+                    self.left_dag = True
+                    self._active_failure = str(exc)
+                    self.synthesis_report.failure = self._active_failure
+                    return None, True
+            else:
+                request_programs = ()
+        self._active_counterexample_seen = True
+        self.left_dag = True
+        if not observation.ok:
+            self._active_failure = observation.error or "invalid request counterexample"
+            self.synthesis_report.failure = self._active_failure
+            self.session.ledger.note(
+                "active request synthesis rejected counterexample: " + self._active_failure
+            )
+            return None, True
+
+        hypothesis = PartialProtocolHypothesis(
+            schema_transforms=tuple(SchemaTransform(value) for value in probe.config.transforms)
+        )
+        constraint_rows = evidence_from_counterexample(observation, generation)
+        for row in constraint_rows:
+            self.synthesis_report.evidence.record(row)
+        seed_request = tuple(effective_protocol(probe.config.driver()).request)
+        seed_hypothesis = PartialProtocolHypothesis(
+            request=seed_request,
+            schema_transforms=hypothesis.schema_transforms,
+        )
+        rejected = counterexample_evidence(
+            component=ProtocolComponent.REQUEST,
+            generation=generation,
+            observation=(
+                "the paid G1 wire did not expose the catalog structure required by "
+                "the endpoint's nonce-bound request constraints"
+            ),
+            contradiction_class=ContradictionClass.STRUCTURAL,
+        )
+        self.synthesis_report.evidence.eliminate(
+            ProtocolComponent.REQUEST,
+            seed_hypothesis.component_fingerprint(ProtocolComponent.REQUEST),
+            evidence=rejected,
+        )
+        experiment = self.obligation_planner.choose(hypothesis, self.synthesis_report.evidence)
+        if experiment is None or experiment.component != ProtocolComponent.REQUEST:
+            self._active_failure = "obligation planner did not select the request hole"
+            self.synthesis_report.failure = self._active_failure
+            return None, True
+        self.synthesis_report.record_experiment(experiment)
+        self.session.ledger.decide(
+            phase="active-synthesis-plan",
+            **experiment.as_dict(),
+        )
+        offered_names = {tool.name for tool in tools}
+        refined: PartialProtocolHypothesis | None = None
+        active_branch: Branch | None = None
+        syn: Syndrome | None = None
+        paid: Generation | None = None
+        for candidate_index, request_program in enumerate(request_programs, start=1):
+            candidate = hypothesis.refine(ProtocolComponent.REQUEST, request_program)
+            driver = self._provisional_request_driver(candidate)
+            candidate_branch = self.session.new_branch(driver)
+            candidate_branch.add_user(content, tools)
+            candidate_syn, candidate_paid = candidate_branch.generate(
+                purpose="explore",
+                label=f"active-G1@request-{candidate_index}",
+                reason=experiment.reason,
+                offered_tool_names=offered_names,
+            )
+            self._discover_paid_response(
+                candidate_syn,
+                candidate_paid,
+                offered_names=offered_names,
+                expected=expected,
+                label=f"active-G1@request-{candidate_index}",
+            )
+            annotate_arguments(candidate_syn, tools, expected)
+            candidate_ok = probe_succeeded(candidate_syn, expected, batch=True)
+            self.session.ledger.decide(
+                phase="active-request-candidate",
+                generation=candidate_paid.index,
+                candidate=candidate.component_fingerprint(ProtocolComponent.REQUEST),
+                candidate_index=candidate_index,
+                observation=("exact_G1_batch" if candidate_ok else "request_obligations_unproven"),
+                succeeded=candidate_ok,
+            )
+            if candidate_ok:
+                refined = candidate
+                active_branch = candidate_branch
+                syn = candidate_syn
+                paid = candidate_paid
+                break
+            candidate_rejected = negative_behavior_evidence(
+                component=ProtocolComponent.REQUEST,
+                generation=candidate_paid,
+                observation=("this exact request candidate did not elicit a conformant G1 batch"),
+            )
+            self.synthesis_report.evidence.record(candidate_rejected)
+        if refined is None or active_branch is None or syn is None or paid is None:
+            self._active_failure = "bounded request candidates did not satisfy the G1 obligations"
+            self.synthesis_report.failure = self._active_failure
+            return None, True
+
+        request_fact = component_observation_evidence(
+            component=ProtocolComponent.REQUEST,
+            generation=paid,
+            observation=("synthesized request program elicited the exact three-call G1 batch"),
+        )
+        self.synthesis_report.evidence.record(request_fact)
+        self.synthesis_report.record_revision(
+            hypothesis,
+            refined,
+            component=ProtocolComponent.REQUEST,
+            generation_id=paid.index,
+            evidence_ids=[row.evidence_id for row in constraint_rows] + [request_fact.evidence_id],
+            reason=(
+                "composed structural parameters locally and selected the first "
+                "lowest-complexity message placement proven by G1"
+            ),
+        )
+
+        if syn.discovered_parser is not None:
+            response_program: tuple[ResponsePrimitive, ...] = (
+                NativeToolCallsParser(),
+                syn.discovered_parser,
+            )
+        elif syn.accepted_parser is not None:
+            response_program = tuple(
+                effective_protocol(Driver(parser=syn.accepted_parser)).response
+            )
+        else:
+            self._active_failure = "G1 calls have no unambiguous executable parser"
+            self.synthesis_report.failure = self._active_failure
+            return None, True
+        response_refined = refined.refine(ProtocolComponent.RESPONSE, response_program)
+        response_fact = component_observation_evidence(
+            component=ProtocolComponent.RESPONSE,
+            generation=paid,
+            observation=(
+                "response primitive parsed the exact G1 call names, arguments, batch, "
+                "and call-ID discipline"
+            ),
+        )
+        self.synthesis_report.evidence.record(response_fact)
+        g1_evidence_ids = (request_fact.evidence_id, response_fact.evidence_id)
+        for support in obligation_support_evidence(
+            obligation_ids=("OB07", "OB08", "OB09", "OB12", "OB17", "OB18"),
+            generations=(paid,),
+            component_evidence_ids=g1_evidence_ids,
+            observation=(
+                "G1 is relevant to these obligations but does not contain their "
+                "complete multi-turn witness"
+            ),
+        ):
+            self.synthesis_report.evidence.record_support(support)
+        g1_witnesses = obligation_witness_evidence(
+            obligation_ids=("OB01", "OB02", "OB03", "OB04", "OB05", "OB06"),
+            phase=WitnessPhase.G1,
+            generations=(paid,),
+            component_evidence_ids=g1_evidence_ids,
+            observation=(
+                "the exact G1 batch contains offered names, schema-valid exact "
+                "arguments, nested schema use, and one parallel call turn"
+            ),
+        )
+        for witness in g1_witnesses:
+            self.synthesis_report.evidence.record_witness(witness)
+        self.synthesis_report.record_revision(
+            refined,
+            response_refined,
+            component=ProtocolComponent.RESPONSE,
+            generation_id=paid.index,
+            evidence_ids=[response_fact.evidence_id],
+            reason=(
+                "reused the paid G1 bytes to infer and validate one bounded response "
+                "primitive without another endpoint call"
+            ),
+        )
+        self.session.ledger.decide(
+            phase="active-request-validated",
+            generation=paid.index,
+            request_fingerprint=response_refined.component_fingerprint(ProtocolComponent.REQUEST),
+            response_fingerprint=response_refined.component_fingerprint(ProtocolComponent.RESPONSE),
+            obligations=[witness.obligation_id for witness in g1_witnesses],
+            succeeded=True,
+        )
+        return (
+            _Trajectory(
+                active_branch,
+                probe.config,
+                syn,
+                active_branch.freeze(),
+                active_hypothesis=response_refined,
+            ),
+            True,
+        )
 
     # ------------------------------------------------------------------
     # candidate configurations
     # ------------------------------------------------------------------
 
     def _frontier_evidence(self, tried: set[str]) -> FrontierEvidence:
-        """Build replanner evidence from the live session + SAFE eliminations.
+        """Build replanner evidence from paid observations and explicit trials.
 
         ``tried`` is the set of *evaluated* RequestConfig keys (SAFE), not
         "every wire sibling we might never need to pay for again."
@@ -293,12 +615,9 @@ class XptCompiler:
     def _wire_class_keys(self, cfg: RequestConfig) -> list[str]:
         """RequestConfig keys that emit the exact same G1 request as ``cfg``.
 
-        SAFE justification (frozen grammar): RequestConfig only sets
-        tool_encoding + schema_transforms; G1 wire is a pure function of those
-        fields on the gauntlet tool set. Equal wire hash ⇒ equal G1 observation.
-        Parser / tool_result_encoding are not part of RequestConfig (resolved
-        later by free parse + counterfactual fork). Therefore wire-identical
-        RequestConfigs form one diagnosis experiment class.
+        Equality permits observation reuse and experiment-cost ranking. It does
+        not make a stochastic response repeatable, so it is not itself a SAFE
+        hypothesis-elimination rule.
         """
         target = g1_fingerprint(cfg, seed=self.seed).full_hash
         return [
@@ -308,7 +627,7 @@ class XptCompiler:
         ]
 
     def _mark_g1_wire(self, cfg: RequestConfig, *, ok: bool) -> str:
-        """Fingerprint the G1 request; on failure SAFE-eliminate the wire class."""
+        """Fingerprint G1 and retain failures as heuristic ranking evidence."""
         fp = g1_fingerprint(cfg, seed=self.seed)
         if not hasattr(self, "_traj_failed_wires"):
             self._traj_failed_wires = set()
@@ -328,15 +647,28 @@ class XptCompiler:
         self._wire_fingerprints[fp.full_hash] = fp
         self._traj_failed_wires.add(fp.full_hash)
 
-    def _safe_eliminate_wire_class(self, cfg: RequestConfig, *, reason: str) -> None:
-        """SAFE: eliminate every RequestConfig with the same exact G1 wire as ``cfg``."""
+    def _safe_eliminate_wire_class(
+        self,
+        cfg: RequestConfig,
+        *,
+        reason: str,
+        contradiction_class: ContradictionClass,
+    ) -> None:
+        """Eliminate a wire class only after a deterministic contradiction."""
+        if contradiction_class not in {
+            ContradictionClass.STRUCTURAL,
+            ContradictionClass.WIRE_API,
+            ContradictionClass.PARSER_SCHEMA,
+        }:
+            raise ValueError("ordinary model behavior is not a SAFE wire-class elimination")
         if not hasattr(self, "_safe_eliminated"):
             self._safe_eliminated = set()
         keys = self._wire_class_keys(cfg)
         for key in keys:
             self._safe_eliminated.add(key)
         self.session.ledger.note(
-            f"SAFE eliminate G1 wire class of {cfg.key} ({len(keys)} configs): {reason}"
+            "SAFE deterministic elimination of G1 wire class "
+            f"{cfg.key} ({len(keys)} configs): {reason}"
         )
 
     def _candidate_configs(self):
@@ -375,14 +707,15 @@ class XptCompiler:
                 succeeded=ok,
                 hypotheses_before=node.n_hypotheses,
             )
+            active, claimed = self._maybe_active_request_trajectory(probe, branch, succeeded=ok)
+            if claimed:
+                if active is not None:
+                    yield active
+                return
             if ok and probe.kind == "gauntlet_turn1":
                 yield _Trajectory(branch, probe.config, syn, branch.freeze())
                 exited_early = True
                 break
-            if not ok and probe.kind == "gauntlet_turn1":
-                # SAFE: same G1 wire ⇒ same observation under the frozen grammar.
-                for key in self._wire_class_keys(probe.config):
-                    tried.add(key)
             child = node.children.get(obs)
             if child is None:
                 self.left_dag = True
@@ -409,12 +742,15 @@ class XptCompiler:
                 self.session.ledger.decide(
                     phase="config", probe=probe.id, reason=self._reason, succeeded=ok
                 )
+                active, claimed = self._maybe_active_request_trajectory(probe, branch, succeeded=ok)
+                if claimed:
+                    if active is not None:
+                        yield active
+                    return
                 if ok:
                     yield _Trajectory(branch, cfg, syn, branch.freeze())
                 else:
                     self.left_dag = True
-                    for key in self._wire_class_keys(cfg):
-                        tried.add(key)
 
         # Open-world continuation: replan over remaining wire-distinct configs.
         # Complexity must not decide which expensive request is sent next.
@@ -424,9 +760,8 @@ class XptCompiler:
             # top-level compiler so it is reported as BUDGET_EXHAUSTED or
             # ENDPOINT_TOO_SLOW rather than UNSUPPORTED.
             self.session.check_can_explore()
-            # Merge SAFE eliminations recorded by run() after a yielded trajectory
-            # fails (trajectory / certification) — generator-local `tried` alone
-            # cannot see those events.
+            # Merge only explicit deterministic eliminations. Ordinary G1,
+            # trajectory, and certification failures remain ranking evidence.
             tried |= getattr(self, "_safe_eliminated", set())
             remaining = [c for c in all_request_configs() if c.key not in tried]
             if not remaining:
@@ -439,9 +774,8 @@ class XptCompiler:
                 )
                 return
             cfg, selection = picked
-            # Evaluate the representative only. Wire siblings stay live until a
-            # SAFE post-evaluation rule eliminates the wire class (equal G1
-            # request ⇒ equal observation under the frozen grammar).
+            # Evaluate one representative. Equal wires share cost features but
+            # remain live unless deterministic protocol evidence rejects them.
             self._reason = selection.reason
             self.session.ledger.decide(
                 phase="frontier-replan",
@@ -467,21 +801,20 @@ class XptCompiler:
                 reason=self._reason,
                 succeeded=ok,
             )
+            active, claimed = self._maybe_active_request_trajectory(probe, branch, succeeded=ok)
+            if claimed:
+                if active is not None:
+                    yield active
+                return
             if ok:
-                # G1 success: only this config is "in flight". Siblings with the
-                # same wire remain candidates only if this trajectory fails and
-                # we would re-select — SAFE rule then eliminates the whole class
-                # after a full trajectory/cert failure (continuation equivalence).
+                # G1 success: only this exact config is in flight.
                 tried.add(cfg.key)
                 yield _Trajectory(branch, cfg, syn, branch.freeze())
             else:
-                # SAFE: same G1 request would produce the same raw response;
-                # eliminate the entire exact-wire RequestConfig class.
-                for key in self._wire_class_keys(cfg):
-                    tried.add(key)
+                tried.add(cfg.key)
                 self.session.ledger.note(
-                    f"SAFE eliminate wire class of {cfg.key} after G1 failure "
-                    f"({len(self._wire_class_keys(cfg))} RequestConfigs share this G1 request)"
+                    f"negative G1 behavior for {cfg.key}; retained only as "
+                    "heuristic evidence because the endpoint may be stochastic"
                 )
 
     # ------------------------------------------------------------------
@@ -489,9 +822,7 @@ class XptCompiler:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _narrow_parsers(
-        live: set[ParserKind], syn: Syndrome
-    ) -> set[ParserKind]:
+    def _narrow_parsers(live: set[ParserKind], syn: Syndrome) -> set[ParserKind]:
         """Intersect the surviving parser set with this turn's compatible set.
 
         Parsers form a capability lattice: `tagged_json` and `xml_json` each parse
@@ -573,9 +904,7 @@ class XptCompiler:
             if settled is not None:
                 outcome = syn.parser_outcomes[settled]
                 names = {c.name for c in outcome.calls}
-                values = {
-                    c.name: c.arguments == expected.get(c.name) for c in outcome.calls
-                }
+                values = {c.name: c.arguments == expected.get(c.name) for c in outcome.calls}
                 ok = (
                     outcome.ok
                     and names == set(RECOVERY_TOOLS)
@@ -601,9 +930,7 @@ class XptCompiler:
                     fork.add_tool_result(
                         call_id=call.id,
                         name=call.name,
-                        content=inst.recovery_results().get(
-                            call.name, {"status": "ok"}
-                        ),
+                        content=inst.recovery_results().get(call.name, {"status": "ok"}),
                     )
             self.session.check_can_explore()
             syn3, _ = fork.generate(
@@ -618,9 +945,7 @@ class XptCompiler:
             final_text = (syn3.content_text or "").strip()
             # G3 is a no-call turn: require that *no* parser produced tool calls
             # (not merely that accepted_parser is unset under AMBIGUOUS).
-            any_parser_calls = any(
-                o.n_calls > 0 for o in syn3.parser_outcomes.values()
-            )
+            any_parser_calls = any(o.n_calls > 0 for o in syn3.parser_outcomes.values())
             g3_ok = (
                 syn3.consensus != ParseConsensus.AMBIGUOUS
                 and not any_parser_calls
@@ -631,7 +956,8 @@ class XptCompiler:
                 phase="termination",
                 encoding=encoding.value,
                 observation=(
-                    "final_ack" if g3_ok
+                    "final_ack"
+                    if g3_ok
                     else (
                         "ambiguous_parse"
                         if syn3.consensus == ParseConsensus.AMBIGUOUS
@@ -688,13 +1014,9 @@ class XptCompiler:
                 ),
                 offered_tool_names={t.name for t in gauntlet_tools()},
             )
-            calls, is_batch, _, errors = _observe_with_driver(
-                generation.response, driver
-            )
+            calls, is_batch, _, errors = _observe_with_driver(generation.response, driver)
             names = {call.name for call in calls}
-            values = {
-                call.name: call.arguments == expected.get(call.name) for call in calls
-            }
+            values = {call.name: call.arguments == expected.get(call.name) for call in calls}
             g2_ok = (
                 not errors
                 and is_batch
@@ -706,9 +1028,7 @@ class XptCompiler:
                 phase="result_encoding",
                 encoding=encoding.value,
                 observation=(
-                    "discovered_parser_validated"
-                    if g2_ok
-                    else "discovered_parser_rejected"
+                    "discovered_parser_validated" if g2_ok else "discovered_parser_rejected"
                 ),
                 parser=parser.model_dump(mode="json"),
                 parse_errors=list(errors),
@@ -727,19 +1047,13 @@ class XptCompiler:
             _, generation3 = fork.generate(
                 purpose="explore",
                 label=f"G3@{encoding.value}",
-                reason=(
-                    "validating synthesized-parser no-call termination with the ack sentinel"
-                ),
+                reason=("validating synthesized-parser no-call termination with the ack sentinel"),
                 offered_tool_names={t.name for t in gauntlet_tools()},
             )
             final_calls, _, final_text, final_errors = _observe_with_driver(
                 generation3.response, driver
             )
-            g3_ok = (
-                not final_errors
-                and not final_calls
-                and final_text.strip() == inst.ack_value
-            )
+            g3_ok = not final_errors and not final_calls and final_text.strip() == inst.ack_value
             self.session.ledger.decide(
                 phase="termination",
                 encoding=encoding.value,
@@ -753,13 +1067,367 @@ class XptCompiler:
                 return encoding, driver
         return None
 
+    def _append_initial_diagnostic_results(
+        self, branch: Branch, calls: tuple[ToolCall, ...]
+    ) -> None:
+        inst = self.diag_inst
+        for call in calls:
+            if call.name == "record_gamma":
+                branch.add_tool_error(
+                    call_id=call.id,
+                    name=call.name,
+                    error=inst.gamma_error_text(),
+                )
+            else:
+                branch.add_tool_result(
+                    call_id=call.id,
+                    name=call.name,
+                    content=inst.result_for(call.name),
+                )
+
+    def _active_g2_ok(
+        self, generation: Generation, driver: Driver
+    ) -> tuple[bool, tuple[ToolCall, ...], tuple[str, ...]]:
+        expected = self.diag_inst.expected_recovery_arguments()
+        calls, is_batch, _, errors = _observe_with_driver(generation.response, driver)
+        names = {call.name for call in calls}
+        values = {call.name: call.arguments == expected.get(call.name) for call in calls}
+        ok = (
+            not errors
+            and is_batch
+            and names == set(RECOVERY_TOOLS)
+            and len(calls) == len(RECOVERY_TOOLS)
+            and all(values.get(name) for name in RECOVERY_TOOLS)
+        )
+        return ok, calls, errors
+
+    def _run_active_result_candidate(
+        self,
+        traj: _Trajectory,
+        hypothesis: PartialProtocolHypothesis,
+        *,
+        label: str,
+        reason: str,
+    ) -> tuple[Driver, Branch, Generation, bool, tuple[ToolCall, ...]]:
+        driver = hypothesis.to_driver()
+        fork = traj.branch.fork(driver, reason=reason)
+        assert fork.freeze() == traj.frozen_prefix
+        self._append_initial_diagnostic_results(fork, traj.syndrome.accepted_calls)
+        self.session.check_can_explore()
+        _, generation = fork.generate(
+            purpose="explore",
+            label=label,
+            reason=reason,
+            offered_tool_names={tool.name for tool in gauntlet_tools()},
+        )
+        ok, calls, errors = self._active_g2_ok(generation, driver)
+        self.session.ledger.decide(
+            phase="active-tool-result-validation",
+            generation=generation.index,
+            candidate=hypothesis.component_fingerprint(ProtocolComponent.TOOL_RESULT),
+            observation="exact_recovery_batch" if ok else "result_not_consumed",
+            parse_errors=list(errors),
+            succeeded=ok,
+        )
+        return driver, fork, generation, ok, calls
+
+    def complete_active_trajectory(self, traj: _Trajectory) -> Driver | None:
+        """Resolve only the result hole, then validate G2/G3 unchanged.
+
+        One lowest-complexity executable baseline is tried.  If it fails, XPT
+        recovers literal/field segments locally from a fresh-sentinel example
+        (or strict atomic counterexample) and tests only the bounded message
+        placement choices.  Only the tool-result component is revised; paid G1
+        request/response evidence remains live.  There is no unbounded search.
+        """
+        hypothesis = traj.active_hypothesis
+        if hypothesis is None:
+            return None
+        generation1 = traj.branch.last_generation
+        if generation1 is None:
+            self._active_failure = "active result synthesis has no G1 witness generation"
+            self.synthesis_report.failure = self._active_failure
+            return None
+        experiment = self.obligation_planner.choose(hypothesis, self.synthesis_report.evidence)
+        if experiment is None or experiment.component != ProtocolComponent.TOOL_RESULT:
+            self._active_failure = "obligation planner did not select the result hole"
+            self.synthesis_report.failure = self._active_failure
+            return None
+        self.synthesis_report.record_experiment(experiment)
+        self.session.ledger.decide(
+            phase="active-synthesis-plan",
+            **experiment.as_dict(),
+        )
+
+        baseline = ToolResultMessage(
+            role="tool",
+            segments=[ResultField(field="content")],
+            attach_tool_call_id=True,
+        )
+        baseline_hypothesis = hypothesis.refine(ProtocolComponent.TOOL_RESULT, baseline)
+        driver, fork, generation, ok, calls = self._run_active_result_candidate(
+            traj,
+            baseline_hypothesis,
+            label="active-G2@minimal-result",
+            reason=(
+                "testing the lowest-complexity result renderer for the obligations "
+                + ", ".join(experiment.implicated_obligations)
+            ),
+        )
+
+        selected = baseline_hypothesis
+        if ok:
+            result_fact = component_observation_evidence(
+                component=ProtocolComponent.TOOL_RESULT,
+                generation=generation,
+                observation=(
+                    "minimal result renderer carried all result/error sentinels into "
+                    "the exact G2 recovery batch"
+                ),
+            )
+            self.synthesis_report.evidence.record(result_fact)
+            self.synthesis_report.record_revision(
+                hypothesis,
+                selected,
+                component=ProtocolComponent.TOOL_RESULT,
+                generation_id=generation.index,
+                evidence_ids=[result_fact.evidence_id],
+                reason="accepted the lowest-complexity result renderer proven by G2",
+            )
+        else:
+            sample_call = next(
+                (call for call in traj.syndrome.accepted_calls if call.name == "record_alpha"),
+                None,
+            )
+            if sample_call is None:
+                self._active_failure = "G1 has no record_alpha result witness"
+                self.synthesis_report.failure = self._active_failure
+                return None
+            structural = discover_tool_result_program_from_example(
+                generation.response,
+                result=ToolResult(
+                    call_id=sample_call.id,
+                    name=sample_call.name,
+                    content=self.diag_inst.result_for(sample_call.name),
+                ),
+                expected_nonce=self.diag_inst.alpha_token,
+            )
+            result_programs: tuple[ToolResultMessage, ...]
+            if structural.ok:
+                assert structural.observation is not None
+                observation = structural.observation
+                result_programs = structural.candidates
+            elif structural.found:
+                self._active_failure = structural.error or "invalid result example"
+                self.synthesis_report.failure = self._active_failure
+                return None
+            else:
+                observation = extract_counterexample(
+                    generation.response,
+                    expected_component=ProtocolComponent.TOOL_RESULT,
+                    expected_nonce=self.diag_inst.alpha_token,
+                )
+                if observation.ok:
+                    try:
+                        result_programs = (synthesize_tool_result_program(observation),)
+                    except ValueError as exc:
+                        self._active_failure = str(exc)
+                        self.synthesis_report.failure = self._active_failure
+                        return None
+                else:
+                    result_programs = ()
+            if not observation.found:
+                self._active_failure = (
+                    "result consumption failed without a fresh-sentinel result example "
+                    "or reusable atomic constraints"
+                )
+                self.synthesis_report.failure = self._active_failure
+                return None
+            if not observation.ok:
+                self._active_failure = observation.error or "invalid result counterexample"
+                self.synthesis_report.failure = self._active_failure
+                return None
+            rejected = counterexample_evidence(
+                component=ProtocolComponent.TOOL_RESULT,
+                generation=generation,
+                observation=(
+                    "minimal renderer failed result consumption and the endpoint returned "
+                    "nonce-bound tool-result constraints"
+                ),
+                contradiction_class=ContradictionClass.STRUCTURAL,
+            )
+            self.synthesis_report.evidence.eliminate(
+                ProtocolComponent.TOOL_RESULT,
+                baseline_hypothesis.component_fingerprint(ProtocolComponent.TOOL_RESULT),
+                evidence=rejected,
+            )
+            constraint_rows = evidence_from_counterexample(observation, generation)
+            for row in constraint_rows:
+                self.synthesis_report.evidence.record(row)
+            selected = hypothesis
+            for candidate_index, result_program in enumerate(result_programs, start=1):
+                candidate = hypothesis.refine(ProtocolComponent.TOOL_RESULT, result_program)
+                driver, fork, generation, ok, calls = self._run_active_result_candidate(
+                    traj,
+                    candidate,
+                    label=f"active-G2@result-{candidate_index}",
+                    reason=(
+                        "validating a bounded message-placement choice while "
+                        "reusing all locally inferred result-template parameters"
+                    ),
+                )
+                if ok:
+                    selected = candidate
+                    break
+                candidate_rejected = negative_behavior_evidence(
+                    component=ProtocolComponent.TOOL_RESULT,
+                    generation=generation,
+                    observation=(
+                        "this exact result candidate did not carry the fresh sentinels "
+                        "into the G2 recovery batch"
+                    ),
+                )
+                self.synthesis_report.evidence.record(candidate_rejected)
+            if selected is hypothesis or not ok:
+                self._active_failure = "synthesized tool-result renderer did not satisfy G2"
+                self.synthesis_report.failure = self._active_failure
+                return None
+            result_fact = component_observation_evidence(
+                component=ProtocolComponent.TOOL_RESULT,
+                generation=generation,
+                observation=(
+                    "synthesized renderer carried all result/error sentinels into the "
+                    "exact G2 recovery batch"
+                ),
+            )
+            self.synthesis_report.evidence.record(result_fact)
+            self.synthesis_report.record_revision(
+                hypothesis,
+                selected,
+                component=ProtocolComponent.TOOL_RESULT,
+                generation_id=generation.index,
+                evidence_ids=[row.evidence_id for row in constraint_rows]
+                + [result_fact.evidence_id],
+                reason=(
+                    "refined only the result renderer; all template parameters came "
+                    "from the paid fresh-sentinel example, and request/response "
+                    "fingerprints remained unchanged"
+                ),
+            )
+
+        response_fact = component_observation_evidence(
+            component=ProtocolComponent.RESPONSE,
+            generation=generation,
+            observation="the unchanged response program parsed the exact G2 batch",
+        )
+        self.synthesis_report.evidence.record(response_fact)
+        g2_evidence_ids = (result_fact.evidence_id, response_fact.evidence_id)
+        all_calls = tuple(traj.syndrome.accepted_calls) + tuple(calls)
+        call_ids = [call.id for call in all_calls]
+        present_ids = [call_id for call_id in call_ids if call_id is not None]
+        g2_witness_ids = ["OB07", "OB10", "OB11", "OB13", "OB14"]
+        if call_ids and len(present_ids) in {0, len(call_ids)}:
+            g2_witness_ids.append("OB08")
+        if len(set(present_ids)) == len(present_ids):
+            g2_witness_ids.append("OB09")
+        g2_witnesses = obligation_witness_evidence(
+            obligation_ids=tuple(g2_witness_ids),
+            phase=WitnessPhase.G2,
+            generations=(generation1, generation),
+            component_evidence_ids=g2_evidence_ids,
+            observation=(
+                "G1 plus the exact G2 recovery batch completely witnesses call "
+                "cardinality, ID discipline, result association, error consumption, "
+                "and recovery for the listed obligations"
+            ),
+        )
+        for witness in g2_witnesses:
+            self.synthesis_report.evidence.record_witness(witness)
+        for call in calls:
+            fork.add_tool_result(
+                call_id=call.id,
+                name=call.name,
+                content=self.diag_inst.recovery_results().get(call.name, {"status": "ok"}),
+            )
+        self.session.check_can_explore()
+        _, generation3 = fork.generate(
+            purpose="explore",
+            label="active-G3@termination",
+            reason=(
+                "validating the unchanged synthesized request/response/result program "
+                "on no-call termination"
+            ),
+            offered_tool_names={tool.name for tool in gauntlet_tools()},
+        )
+        final_calls, _, final_text, final_errors = _observe_with_driver(
+            generation3.response, driver
+        )
+        g3_ok = (
+            not final_errors and not final_calls and final_text.strip() == self.diag_inst.ack_value
+        )
+        self.session.ledger.decide(
+            phase="active-termination",
+            generation=generation3.index,
+            observation="final_ack" if g3_ok else "bad_or_ambiguous_termination",
+            parse_errors=list(final_errors),
+            succeeded=g3_ok,
+        )
+        if not g3_ok:
+            self._active_failure = "synthesized protocol failed G3 termination"
+            self.synthesis_report.failure = self._active_failure
+            return None
+        request_termination_fact = component_observation_evidence(
+            component=ProtocolComponent.REQUEST,
+            generation=generation3,
+            observation="the unchanged request program elicited no spurious G3 tool call",
+        )
+        response_termination_fact = component_observation_evidence(
+            component=ProtocolComponent.RESPONSE,
+            generation=generation3,
+            observation="the response program parsed exact final text with no tool calls",
+        )
+        result_termination_fact = component_observation_evidence(
+            component=ProtocolComponent.TOOL_RESULT,
+            generation=generation3,
+            observation=(
+                "the same result renderer carried recovery results and produced the "
+                "exact no-call acknowledgement"
+            ),
+        )
+        for fact in (
+            request_termination_fact,
+            response_termination_fact,
+            result_termination_fact,
+        ):
+            self.synthesis_report.evidence.record(fact)
+        g3_witnesses = obligation_witness_evidence(
+            obligation_ids=("OB12", "OB15", "OB16", "OB17"),
+            phase=WitnessPhase.G3,
+            generations=(generation1, generation, generation3),
+            component_evidence_ids=(
+                request_termination_fact.evidence_id,
+                response_termination_fact.evidence_id,
+                result_termination_fact.evidence_id,
+            ),
+            observation=(
+                "the full three-turn diagnosis trace completed two result cycles, "
+                "had no spurious final call, terminated with exact text, and parsed "
+                "without ambiguity"
+            ),
+        )
+        for witness in g3_witnesses:
+            self.synthesis_report.evidence.record_witness(witness)
+        self.synthesis_report.final_hypothesis = selected
+        self.synthesis_report.failure = None
+        traj.branch = fork
+        traj.active_hypothesis = selected
+        return driver
+
     # ------------------------------------------------------------------
     # top level
     # ------------------------------------------------------------------
 
-    def _account_cert_generations(
-        self, n: int, *, driver: Driver, label: str
-    ) -> None:
+    def _account_cert_generations(self, n: int, *, driver: Driver, label: str) -> None:
         """Record certification cost without permitting ledger budget overflow."""
         if n > CERTIFICATION_GENERATION_UPPER_BOUND:
             raise BudgetExhausted(
@@ -800,7 +1468,11 @@ class XptCompiler:
 
     def run(self) -> XptResult:
         started = self.session.clock()
-        result = XptResult(status=UNSUPPORTED, ledger=self.session.ledger)
+        result = XptResult(
+            status=UNSUPPORTED,
+            ledger=self.session.ledger,
+            synthesis_report=self.synthesis_report,
+        )
         ambiguous = False
         attempts = 0
         last_failed_obligations: list[str] = []
@@ -810,58 +1482,76 @@ class XptCompiler:
         try:
             for traj in self._candidate_configs():
                 attempts += 1
+                if traj.active_hypothesis is not None:
+                    driver = self.complete_active_trajectory(traj)
+                    result.equivalent_parsers = ["synthesized:v0.2-response-primitive"]
+                    synthesis_reason = (
+                        "a bounded obligation-directed loop refined typed request, "
+                        "response, and tool-result holes from reusable black-box "
+                        "constraints, then validated the unchanged program through G3"
+                    )
+                    if driver is None:
+                        self.session.ledger.note(
+                            "active protocol synthesis failed closed: "
+                            + (self._active_failure or "unproven protocol component")
+                        )
+                        continue
+                    self.session.ledger.decide(
+                        phase="synthesis",
+                        driver=driver.canonical_dict(),
+                        configurations_attempted=attempts,
+                        reason=synthesis_reason,
+                    )
+                else:
+                    driver = None
+                    synthesis_reason = ""
                 live = set(traj.syndrome.compatible_parsers)
                 if traj.syndrome.consensus == ParseConsensus.AMBIGUOUS:
                     ambiguous = True
-                    self.session.ledger.note(
-                        "ambiguous parse at the first turn; refusing to guess"
-                    )
+                    self.session.ledger.note("ambiguous parse at the first turn; refusing to guess")
                     continue
-                discovered_parser = traj.syndrome.discovered_parser
-                driver: Driver | None = None
-                synthesis_reason: str
-                if discovered_parser is not None:
-                    result.equivalent_parsers = [
-                        f"discovered:{discovered_parser.op}"
-                    ]
-                    discovered = self.complete_discovered_trajectory(
-                        traj, discovered_parser
-                    )
-                    if discovered is not None:
-                        _, driver = discovered
-                    synthesis_reason = (
-                        "request configuration passed G1; a bounded local pass inferred "
-                        "response parser parameters from that paid output; the unchanged "
-                        "program then passed G2+G3 before independent certification"
-                    )
-                else:
-                    if not live:
-                        continue
-                    result.equivalent_parsers = sorted(p.value for p in live)
-                    settled = self.complete_trajectory(traj, live)
-                    if settled is not None:
-                        encoding, parser = settled
-                        driver = _driver_from(traj.config, parser, encoding)
-                    synthesis_reason = (
-                        "request configuration accepted only after the full stateful "
-                        "trajectory (G1+G2+G3); parser is the least-capable survivor of "
-                        "the compatible sets intersected across every observed turn; "
-                        "tool-result encoding from the counterfactual fork"
-                    )
+                if traj.active_hypothesis is None:
+                    discovered_parser = traj.syndrome.discovered_parser
+                    if discovered_parser is not None:
+                        result.equivalent_parsers = [f"discovered:{discovered_parser.op}"]
+                        discovered = self.complete_discovered_trajectory(traj, discovered_parser)
+                        if discovered is not None:
+                            _, driver = discovered
+                        synthesis_reason = (
+                            "request configuration passed G1; a bounded local pass inferred "
+                            "response parser parameters from that paid output; the unchanged "
+                            "program then passed G2+G3 before independent certification"
+                        )
+                    else:
+                        if not live:
+                            continue
+                        result.equivalent_parsers = sorted(p.value for p in live)
+                        settled = self.complete_trajectory(traj, live)
+                        if settled is not None:
+                            encoding, parser = settled
+                            driver = _driver_from(traj.config, parser, encoding)
+                        synthesis_reason = (
+                            "request configuration accepted only after the full stateful "
+                            "trajectory (G1+G2+G3); parser is the least-capable survivor of "
+                            "the compatible sets intersected across every observed turn; "
+                            "tool-result encoding from the counterfactual fork"
+                        )
 
                 if driver is None:
-                    self._mark_trajectory_failed(traj.config)
-                    self._safe_eliminate_wire_class(
-                        traj.config,
-                        reason="stateful trajectory failed after G1",
-                    )
+                    if traj.active_hypothesis is None:
+                        self._mark_trajectory_failed(traj.config)
+                        self.session.ledger.note(
+                            "stateful trajectory failure retained as negative behavioral "
+                            f"evidence for {traj.config.key}; no SAFE elimination"
+                        )
                     continue
-                self.session.ledger.decide(
-                    phase="synthesis",
-                    driver=driver.canonical_dict(),
-                    configurations_attempted=attempts,
-                    reason=synthesis_reason,
-                )
+                if traj.active_hypothesis is None:
+                    self.session.ledger.decide(
+                        phase="synthesis",
+                        driver=driver.canonical_dict(),
+                        configurations_attempted=attempts,
+                        reason=synthesis_reason,
+                    )
 
                 try:
                     self.session.check_can_certify(
@@ -886,9 +1576,7 @@ class XptCompiler:
                     result.left_compiled_dag = self.left_dag
                     return result
 
-                cert_inst = mint_instance(
-                    seed=self.seed + 977, salt="certify", surface_form="B"
-                )
+                cert_inst = mint_instance(seed=self.seed + 977, salt="certify", surface_form="B")
                 # ``run_probe`` performs one initial generation plus at most
                 # ``max_cycles`` resumptions.  Two tool cycles therefore hard-cap
                 # the frozen G1->G2->G3 certification trajectory at 3 generations.
@@ -906,11 +1594,15 @@ class XptCompiler:
                 # Infra/config failures during cert must not SAFE-eliminate wire classes.
                 if run.termination == Termination.INFRASTRUCTURE_FAILED:
                     raise InfrastructureFailed(
-                        run.errors[0] if run.errors else "infrastructure failure during certification"
+                        run.errors[0]
+                        if run.errors
+                        else "infrastructure failure during certification"
                     )
                 if run.termination == Termination.CONFIGURATION_FAILED:
                     raise ConfigurationFailed(
-                        run.errors[0] if run.errors else "configuration failure during certification"
+                        run.errors[0]
+                        if run.errors
+                        else "configuration failure during certification"
                     )
                 if run.generations > CERTIFICATION_GENERATION_UPPER_BOUND:
                     raise RuntimeError(
@@ -924,10 +1616,22 @@ class XptCompiler:
 
                 # Obligations + production evaluator must both pass (certify.passed).
                 if run.passed:
+                    if traj.active_hypothesis is not None:
+                        self.synthesis_report.certification = {
+                            "passed": True,
+                            "authority": "independent_certification",
+                            "fresh_instance": True,
+                            "production_runtime": True,
+                            "generations": run.generations,
+                            "mandatory_coverage": run.certificate.mandatory_coverage,
+                            "certificate": run.certificate.as_dict(),
+                            "reason": (
+                                "the final unchanged Driver survived all mandatory ABI "
+                                "obligations on the independent production-runtime run"
+                            ),
+                        }
                     result.status = CERTIFIED
-                    result.reason = (
-                        "all mandatory ABI obligations verified on a fresh instance"
-                    )
+                    result.reason = "all mandatory ABI obligations verified on a fresh instance"
                     result.driver = driver
                     result.certificate = run.certificate
                     result.certification_generations = cert_gens_total
@@ -955,19 +1659,30 @@ class XptCompiler:
                 if not last_failed_obligations and not run.passed:
                     eval_errors = list(run.evaluator_result.get("errors") or [])
                     if eval_errors:
-                        last_failed_obligations = [
-                            f"evaluator:{e}" for e in eval_errors[:8]
-                        ]
+                        last_failed_obligations = [f"evaluator:{e}" for e in eval_errors[:8]]
                     elif run.evaluator_result.get("interface_ok") is False:
                         last_failed_obligations = ["evaluator:interface_ok=false"]
                 result.certificate = run.certificate
-                self._mark_trajectory_failed(traj.config)
-                self._safe_eliminate_wire_class(
-                    traj.config,
-                    reason=(
-                        f"independent certification failed: {last_failed_obligations}"
-                    ),
-                )
+                if traj.active_hypothesis is None:
+                    self._mark_trajectory_failed(traj.config)
+                    self.session.ledger.note(
+                        "independent certification failure retained as negative behavioral "
+                        f"evidence for {traj.config.key}: {last_failed_obligations}"
+                    )
+                else:
+                    self.synthesis_report.failure = (
+                        "independent certification rejected the synthesized program: "
+                        + repr(last_failed_obligations)
+                    )
+                    self.synthesis_report.certification = {
+                        "passed": False,
+                        "authority": "independent_certification",
+                        "fresh_instance": True,
+                        "production_runtime": True,
+                        "generations": run.generations,
+                        "failed_obligations": list(last_failed_obligations),
+                        "certificate": run.certificate.as_dict(),
+                    }
         except DeadlineExceeded as exc:
             result.status = ENDPOINT_TOO_SLOW
             result.reason = str(exc)
@@ -1012,7 +1727,9 @@ class XptCompiler:
         result.diagnosis_generations = self._diag_gen_count()
         result.certification_generations = cert_gens_total
         result.driver = last_driver
-        if last_failed_obligations:
+        if self._active_failure:
+            result.reason = "active protocol synthesis failed closed: " + self._active_failure
+        elif last_failed_obligations:
             result.failed_obligations = last_failed_obligations
             result.reason = (
                 f"{attempts} configuration(s) attempted; last independent certification "

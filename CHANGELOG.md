@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Obligation-directed active protocol synthesis
+
+- Added typed partial protocol hypotheses with unresolved request, response, and tool-result holes; unresolved hypotheses cannot become Driver artifacts.
+- Added reusable per-component structural facts tied to generation and wire hashes, separate obligation-support rows, turn-scoped complete witnesses, and a distinct independent-certification boundary.
+- Added deterministic obligation-directed experiment planning using the existing Tool ABI component attribution. Ranking signals never eliminate hypotheses.
+- Added a bounded counterexample-guided loop that can infer a nested JSON catalog and framed call sample from a rejected wire, reuse the response-parser discovery pass, and recover a segmented tool-result renderer from a fresh-sentinel example.
+- Added nonce binding, strict bounds, conflict detection, deterministic-contradiction-only elimination, and component-isolated refinement. Ordinary negative model behavior remains ranking evidence and cannot permanently eliminate a hypothesis. State actions remain fixed.
+- Added a procedurally generated end-to-end holdout outside the legacy request, response, and result frontier; all literal parameters are inferred locally, bounded message-placement choices are tested, and the final program is discovered in eight diagnosis generations and independently certified in three.
+- Expanded compiler reports with component constraints, hypothesis fingerprints/revisions, implicated obligations, and certification survival reasons.
+- Preserved v0.1 JSON/hash identity, v0.2 compatibility, the 12-generation budget, three-generation certification reserve, and 300-second deadline.
+
+This milestone proves one narrow claim: XPT can synthesize and independently certify one previously unseen request + response + tool-result program from black-box observations. It does not claim universal protocol or state-machine synthesis.
+
 ## 0.2.0 - 2026-08-08
 
 ### Driver protocol IR

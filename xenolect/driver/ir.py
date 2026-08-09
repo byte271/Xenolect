@@ -102,8 +102,51 @@ class JsonToolCatalogRequest(_IRModel):
     fields: ToolCallFields = Field(default_factory=ToolCallFields)
 
 
+class ToolDefinitionFields(_IRModel):
+    """Map normalized tool-definition fields into a JSON catalog item."""
+
+    name: str = "name"
+    description: str = "description"
+    parameters: str = "parameters"
+
+    @model_validator(mode="after")
+    def _keys_are_non_empty_and_distinct(self) -> ToolDefinitionFields:
+        values = (self.name, self.description, self.parameters)
+        if any(not value for value in values):
+            raise ValueError("tool-definition field names must not be empty")
+        if len(set(values)) != len(values):
+            raise ValueError("tool-definition field names must be distinct")
+        return self
+
+
+class TemplatedJsonToolCatalogRequest(_IRModel):
+    """Render a JSON catalog with parameterized placement and object shape.
+
+    ``catalog_path`` describes nested object keys around the tool list.  For
+    example ``["registry", "entries"]`` renders
+    ``{"registry": {"entries": [...]}}``.  This is a structural primitive,
+    not a named provider/model dialect.
+    """
+
+    op: Literal["templated_json_tool_catalog"] = "templated_json_tool_catalog"
+    role: Literal["system", "user"]
+    instruction: str
+    catalog_heading: str = ""
+    catalog_path: list[str] = Field(default_factory=list, max_length=4)
+    tool_fields: ToolDefinitionFields = Field(default_factory=ToolDefinitionFields)
+    call_frame: TextFrame
+    fields: ToolCallFields = Field(default_factory=ToolCallFields)
+
+    @field_validator("catalog_path")
+    @classmethod
+    def _catalog_path_keys_are_valid(cls, value: list[str]) -> list[str]:
+        if any(not key for key in value):
+            raise ValueError("catalog path keys must not be empty")
+        return value
+
+
 RequestPrimitive = Annotated[
-    NativeToolsRequest | JsonToolCatalogRequest,
+    NativeToolsRequest | JsonToolCatalogRequest | TemplatedJsonToolCatalogRequest,
     Field(discriminator="op"),
 ]
 
@@ -227,15 +270,13 @@ def driver_grammar_size() -> int:
     """Size of the bounded legacy frontier currently searched online.
 
     The v0.2 protocol IR is parameterized and therefore has no honest finite
-    grammar size.  XPT deliberately starts with the proven request choices from
-    the 144-program v0.1 frontier, then may synthesize a bounded response parser
-    primitive from observations before composing the v0.2 program.
+    grammar size.  The legacy compatibility path still starts with the proven
+    choices from the 144-program v0.1 frontier.  The active path instead carries
+    typed request/response/result holes and may compose parameterized v0.2
+    primitives from bounded black-box evidence.
     """
     return (
-        len(ToolEncoding)
-        * (2 ** len(SchemaTransform))
-        * len(ParserKind)
-        * len(ToolResultEncoding)
+        len(ToolEncoding) * (2 ** len(SchemaTransform)) * len(ParserKind) * len(ToolResultEncoding)
     )
 
 
@@ -274,17 +315,13 @@ class Driver(BaseModel):
 
     @field_validator("schema_transforms")
     @classmethod
-    def _canonicalize_transforms(
-        cls, value: list[SchemaTransform]
-    ) -> list[SchemaTransform]:
+    def _canonicalize_transforms(cls, value: list[SchemaTransform]) -> list[SchemaTransform]:
         return canonical_schema_transforms(value)
 
     @model_validator(mode="after")
     def _version_matches_representation(self) -> Driver:
         if self.protocol is None and self.ir_version != "0.1":
-            raise ValueError(
-                f"Driver IR {self.ir_version!r} requires an explicit protocol program"
-            )
+            raise ValueError(f"Driver IR {self.ir_version!r} requires an explicit protocol program")
         if self.protocol is not None and self.ir_version != "0.2":
             raise ValueError("composable protocol programs require Driver IR '0.2'")
         return self
@@ -293,7 +330,8 @@ class Driver(BaseModel):
         """Simple complexity score for minimality (lower is better)."""
         if self.protocol is not None:
             non_native_request = sum(
-                isinstance(op, JsonToolCatalogRequest) for op in self.protocol.request
+                isinstance(op, (JsonToolCatalogRequest, TemplatedJsonToolCatalogRequest))
+                for op in self.protocol.request
             )
             non_native_parser = sum(
                 isinstance(op, (FramedJsonToolCallsParser, JsonObjectToolCallsParser))
@@ -335,9 +373,7 @@ class Driver(BaseModel):
             }
 
         if self.ir_version != "0.1":
-            raise ValueError(
-                f"Driver IR {self.ir_version!r} requires an explicit protocol program"
-            )
+            raise ValueError(f"Driver IR {self.ir_version!r} requires an explicit protocol program")
         # Excluding the absent v0.2 field is correctness-critical: old .mdriver
         # files keep the same content hash after upgrading Xenolect.
         payload = self.model_dump(mode="json", exclude={"protocol"})
@@ -411,9 +447,7 @@ def legacy_protocol_program(
         response.extend(
             [
                 FramedJsonToolCallsParser(
-                    frame=TextFrame(
-                        prefix="TOOL_CALL", whitespace_after_prefix=True
-                    ),
+                    frame=TextFrame(prefix="TOOL_CALL", whitespace_after_prefix=True),
                     fields=fields,
                 ),
                 FramedJsonToolCallsParser(
