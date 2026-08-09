@@ -18,6 +18,7 @@ from xenolect.xpt.discrimination import (
 )
 from xenolect.xpt.planner import load_compiled_program
 from xenolect.xpt.runtime import CERTIFIED, UNSUPPORTED, xpt_compile
+from xenolect.xpt.session import Budget
 
 GENERIC_ERROR = {
     "error": {"type": "invalid_request_error", "message": "invalid request"}
@@ -554,3 +555,39 @@ def test_candidate_only_ablation_over_the_exact_same_endpoint_family() -> None:
     assert candidate["median_generations"] == 9
     assert candidate["unresolved_or_ambiguous"] == 5
     assert diagnostic["unresolved_or_ambiguous"] == 0
+
+
+def test_candidate_only_ablation_fails_if_certification_crosses_deadline() -> None:
+    class ManualClock:
+        now = 0.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    class DeadlineEndpoint(OracleFreeEndpoint):
+        def __init__(self, constraints: OracleFreeConstraints, clock: ManualClock) -> None:
+            super().__init__(constraints)
+            self.clock = clock
+
+        def chat_completions(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]] | None = None,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            response = super().chat_completions(messages, tools, **kwargs)
+            if len(self.requests) >= 4:
+                self.clock.now = 2.0
+            return response
+
+    clock = ManualClock()
+    run = run_candidate_only_ablation(
+        DeadlineEndpoint(CASES[0], clock),
+        seed=211,
+        budget=Budget(deadline_s=1.0),
+        clock=clock,
+    )
+    assert run.certification_success is False
+    assert run.unresolved is True
+    assert run.certification_generations == 0
+    assert "deadline reached during certification" in run.reason

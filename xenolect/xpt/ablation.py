@@ -8,6 +8,8 @@ uses the same production runtime certification boundary as XPT.
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from statistics import median
 from typing import Any
@@ -114,10 +116,11 @@ def run_candidate_only_ablation(
     *,
     seed: int,
     budget: Budget | None = None,
+    clock: Callable[[], float] = time.perf_counter,
 ) -> CandidateOnlyRun:
     """Evaluate exact complete candidates until success or the shared budget ends."""
     selected_budget = budget or Budget()
-    session = XptSession(client, budget=selected_budget)
+    session = XptSession(client, budget=selected_budget, clock=clock)
     instance = mint_instance(seed=seed, salt="diagnose", surface_form="A")
     tools = gauntlet_tools()
     expected_g1 = instance.expected_batch_arguments()
@@ -218,6 +221,11 @@ def run_candidate_only_ablation(
                     cert_instance,
                     max_cycles=CERTIFICATION_GENERATION_UPPER_BOUND - 1,
                 )
+                remaining_after_cert = session.remaining_s
+                if remaining_after_cert is not None and remaining_after_cert <= 0:
+                    raise DeadlineExceeded(
+                        "compiler wall-clock deadline reached during certification"
+                    )
                 return CandidateOnlyRun(
                     certification_success=certification.passed,
                     diagnosis_generations=session.ledger.generation_count,
