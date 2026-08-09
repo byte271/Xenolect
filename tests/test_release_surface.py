@@ -47,7 +47,7 @@ def test_release_workflow_is_version_bound_and_guarded() -> None:
     assert '--state open' in workflow
     assert '--state merged' in workflow
     assert '--json headRefOid' in workflow
-    assert 'select(.headRefOid == \"$branch_sha\")' in workflow
+    assert r'select(.headRefOid == \"$branch_sha\")' in workflow
     assert 'if [ "$merged_head" != "$branch_sha" ]' in workflow
     assert 'git/refs/heads/${branch}' in workflow
 
