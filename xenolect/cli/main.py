@@ -385,6 +385,8 @@ def install_cmd(
         else:
             reason = "Xenolect could not verify compatibility with this model yet."
         console.print(Panel(reason, title="Model not ready", border_style="red"))
+        if result.report_path is not None:
+            console.print(f"Diagnostic report: [bold]{result.report_path}[/bold]")
         if verbose:
             console.print(f"[dim]status={result.status} generations={result.generations} time={result.elapsed_s:.1f}s[/dim]")
         raise typer.Exit(code=3)

@@ -34,6 +34,7 @@ from xenolect.abi.events import (
     ToolDef,
     ToolResult,
 )
+from xenolect.certification_profile import CertifiedExecutionProfile
 from xenolect.driver.encode import (
     build_tool_preamble_messages,
     encode_textual_tool_call,
@@ -178,7 +179,13 @@ def _textual_call(call: ToolCall, driver: Driver) -> str:
     )
 
 
-def translate_request(body: dict[str, Any], driver: Driver, upstream_model: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None, dict[str, Any]]:
+def translate_request(
+    body: dict[str, Any],
+    driver: Driver,
+    upstream_model: str,
+    *,
+    execution_profile: CertifiedExecutionProfile | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None, dict[str, Any]]:
     """Translate one client OpenAI request to the model-facing wire.
 
     Returns ``(messages, tools, generation_kwargs)``.  The translation is
@@ -291,6 +298,11 @@ def translate_request(body: dict[str, Any], driver: Driver, upstream_model: str)
     extra = {k: v for k, v in body.items() if k not in _RESERVED_REQUEST_KEYS}
     if extra:
         kwargs.setdefault("extra_body", {}).update(extra)
+    if execution_profile is not None:
+        execution_profile.apply_defaults(
+            kwargs,
+            explicit_request_fields=set(body),
+        )
     return messages, wire_tools, kwargs
 
 
@@ -445,7 +457,12 @@ class ProxyService:
                 status=404,
                 code="model_not_installed",
             )
-        messages, tools, kwargs = translate_request(body, self.driver, self.target.model)
+        messages, tools, kwargs = translate_request(
+            body,
+            self.driver,
+            self.target.model,
+            execution_profile=self.target.installed.certified_execution_profile,
+        )
         try:
             raw = self._client_for_request().chat_completions(messages, tools=tools, **kwargs)
         except ClientError as exc:
