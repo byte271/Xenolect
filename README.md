@@ -86,6 +86,8 @@ Common local servers are scanned automatically. If none is found, Xenolect asks 
 
 ## Install
 
+Download the wheel from the [Xenolect v0.3.0 GitHub release](https://github.com/byte271/Xenolect/releases/tag/v0.3.0), then install it for your platform below.
+
 ### Windows
 
 ```powershell
