@@ -5,8 +5,9 @@
 ### Repository maintenance
 
 - After successful CI on `main`, repository automation removes only `agent/*`
-  branches whose pull requests are already merged. The default branch, tags, open
-  work, and unmerged branches are excluded.
+  branches whose current HEAD exactly matches the head SHA of a merged pull request
+  and which have no open pull request. The default branch, tags, active work, and
+  unmerged branch heads are excluded.
 
 ## 0.5.0 - 2026-08-09
 
@@ -86,17 +87,30 @@ positive behavior still fail closed.
 
 ## 0.1.0
 
-### First alpha release
+First alpha release of Xenolect's local model compatibility layer.
 
-- Added one-command local model discovery, bounded black-box Driver compilation,
-  independent Tool ABI certification, and a persistent verified registry.
-- Added the loopback Chat Completions proxy and `install`, `status`, `ban`, `kill`, and
-  `version` commands.
-- Added per-user startup support for Windows, macOS, and Linux without administrator
-  or root privileges where the desktop session provides a standard mechanism.
-- Added the finite 144-program v0.1 grammar, stateful tool-result/history diagnosis,
-  fail-closed unsupported behavior, integrity checks, bounded diagnostics, and local
-  security controls.
+### Product
 
-The first release supported Chat Completions and function tools only. It did not
-claim arbitrary state-machine synthesis or a complete OpenAI API replacement.
+- One-command interactive `xenolect install` flow.
+- Local model discovery and model selection.
+- Persistent verified Driver registry with content-addressed artifacts.
+- One background loopback proxy shared by all installed models.
+- `install`, `status`, `ban`, `kill`, and `version` user commands.
+- Per-user login startup on Windows, macOS, and Linux without administrator/root privileges where the OS session provides a standard user-start mechanism.
+
+### Driver compiler
+
+- Real black-box probing against the selected endpoint.
+- v0.1.0 finite typed Driver grammar: 144 representable protocol programs.
+- Stateful tool-result/history diagnosis and fresh certification before installation.
+- Driver-backed runtime translation of client-supplied tools, assistant tool calls, and tool-result history.
+- Fail-closed behavior when the required compatibility cannot be represented or certified.
+
+### Stability and security
+
+- Hard 12-generation and 300-second default setup budgets.
+- Safe background-service upgrade/restart behavior.
+- macOS immediate background startup uses the native POSIX spawn path to avoid fragile child-side fork setup.
+- The loopback HTTP server binds without reverse-DNS hostname resolution, avoiding multi-second mDNS stalls on some macOS systems.
+- Loopback-only listener policy and restricted CORS.
+- API keys are never persisted in Driver artifacts or registry state.
