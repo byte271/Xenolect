@@ -93,12 +93,16 @@ class OracleFreeEndpoint:
     @staticmethod
     def _normalize_native(tools: list[dict[str, Any]]) -> tuple[dict[str, Any], ...] | None:
         normalized: list[dict[str, Any]] = []
+        names: set[str] = set()
         for item in tools:
             function = item.get("function") if isinstance(item, dict) else None
             if not isinstance(function, dict):
                 return None
             if not isinstance(function.get("name"), str):
                 return None
+            if function["name"] in names:
+                return None
+            names.add(function["name"])
             normalized.append(
                 {
                     "name": function["name"],

@@ -116,6 +116,9 @@ def test_request_probe_plan_is_bounded_deterministic_and_auditable() -> None:
     assert first_probe.as_dict()["production_driver"] is False
     assert first_probe.as_dict()["registry_eligible"] is False
     assert first_probe.as_dict()["abi_witness"] is False
+    native_names = [item["function"]["name"] for item in first_probe.wire()["tools"]]
+    assert native_names == ["report"]
+    assert len(native_names) == len(set(native_names))
 
     members = [
         member
