@@ -19,6 +19,7 @@ from xenolect.driver.ir import (
 )
 from xenolect.xpt.hypothesis import (
     ComponentEvidence,
+    ContradictionClass,
     EvidenceKind,
     EvidenceStore,
     EvidenceStrength,
@@ -26,8 +27,14 @@ from xenolect.xpt.hypothesis import (
     ProtocolComponent,
 )
 from xenolect.xpt.planner import all_request_configs, load_compiled_program
-from xenolect.xpt.protocol_synthesis import extract_counterexample
+from xenolect.xpt.protocol_synthesis import (
+    WitnessPhase,
+    extract_counterexample,
+    obligation_support_evidence,
+    obligation_witness_evidence,
+)
 from xenolect.xpt.runtime import CERTIFIED, UNSUPPORTED, xpt_compile
+from xenolect.xpt.session import Generation
 
 
 @dataclass(frozen=True)
@@ -430,6 +437,24 @@ def test_generated_holdout_synthesizes_all_three_components_and_certifies() -> N
         "response",
         "tool_result",
     }
+    assert all("obligation_ids" not in row for row in report["evidence"]["rows"])
+    diagnosis_witnesses = report["evidence"]["obligation_witnesses"]
+    assert {row["obligation_id"] for row in diagnosis_witnesses} == {
+        f"OB{index:02d}" for index in range(1, 18)
+    }
+    assert "OB18" not in {row["obligation_id"] for row in diagnosis_witnesses}
+    g1_witnesses = [row for row in diagnosis_witnesses if len(row["generation_ids"]) == 1]
+    assert {row["obligation_id"] for row in g1_witnesses} == {
+        "OB01",
+        "OB02",
+        "OB03",
+        "OB04",
+        "OB05",
+        "OB06",
+    }
+    assert report["certification"]["authority"] == "independent_certification"
+    assert report["certification"]["certificate"]["complete"] is True
+    assert len(report["certification"]["certificate"]["rows"]) == 18
     assert set(report["evidence"]["logical_eliminations"]) == {
         "request",
         "tool_result",
@@ -477,16 +502,110 @@ def test_heuristic_ranking_cannot_eliminate_a_hypothesis() -> None:
     heuristic = ComponentEvidence(
         evidence_id="rank-only",
         component=ProtocolComponent.REQUEST,
-        kind=EvidenceKind.OBSERVATION,
+        kind=EvidenceKind.NEGATIVE_BEHAVIOR,
         strength=EvidenceStrength.HEURISTIC,
         generation_id=1,
         request_hash="r",
         response_hash="s",
         observation="higher novelty score",
+        contradiction_class=ContradictionClass.ORDINARY_BEHAVIOR,
     )
     with pytest.raises(ValueError, match="heuristic evidence cannot eliminate"):
         store.eliminate(ProtocolComponent.REQUEST, "candidate", evidence=heuristic)
     assert not store.is_eliminated(ProtocolComponent.REQUEST, "candidate")
+
+
+def _generation(index: int) -> Generation:
+    return Generation(
+        index=index,
+        purpose="explore",
+        label=f"G{index}",
+        branch_id="b",
+        forked_from=None,
+        prefix_hash="p",
+        driver={},
+        request={},
+        request_hash=f"request-{index}",
+        response={},
+        response_hash=f"response-{index}",
+        error=None,
+        latency_ms=0.0,
+        prompt_chars=0,
+        completion_chars=0,
+    )
+
+
+def test_support_is_not_proof_and_witnesses_are_turn_scoped() -> None:
+    generation1 = _generation(1)
+    generation2 = _generation(2)
+    generation3 = _generation(3)
+    store = EvidenceStore()
+    support = obligation_support_evidence(
+        obligation_ids=("OB12",),
+        generations=(generation1,),
+        component_evidence_ids=("component-g1",),
+        observation="G1 is part of a possible history trace",
+    )[0]
+    store.record_support(support)
+    assert store.proven_obligation_ids == set()
+
+    with pytest.raises(ValueError, match="G1 does not contain a complete witness for OB12"):
+        obligation_witness_evidence(
+            obligation_ids=("OB12",),
+            phase=WitnessPhase.G1,
+            generations=(generation1,),
+            component_evidence_ids=("component-g1",),
+            observation="only one turn",
+        )
+    with pytest.raises(ValueError, match="completed-trace certification"):
+        obligation_witness_evidence(
+            obligation_ids=("OB18",),
+            phase=WitnessPhase.G3,
+            generations=(generation1, generation2, generation3),
+            component_evidence_ids=("component-g3",),
+            observation="no completed-trace validator",
+        )
+
+    witness = obligation_witness_evidence(
+        obligation_ids=("OB12",),
+        phase=WitnessPhase.G3,
+        generations=(generation1, generation2, generation3),
+        component_evidence_ids=("component-g1", "component-g2", "component-g3"),
+        observation="two complete result cycles observed across three turns",
+    )[0]
+    store.record_witness(witness)
+    assert store.proven_obligation_ids == {"OB12"}
+
+
+def test_ordinary_negative_behavior_cannot_logically_eliminate() -> None:
+    store = EvidenceStore()
+    ordinary = ComponentEvidence(
+        evidence_id="ordinary-negative",
+        component=ProtocolComponent.REQUEST,
+        kind=EvidenceKind.COUNTEREXAMPLE,
+        strength=EvidenceStrength.LOGICAL,
+        generation_id=1,
+        request_hash="r",
+        response_hash="s",
+        observation="one stochastic response omitted a tool call",
+        contradiction_class=ContradictionClass.ORDINARY_BEHAVIOR,
+    )
+    with pytest.raises(ValueError, match="ordinary model behavior cannot eliminate"):
+        store.eliminate(ProtocolComponent.REQUEST, "candidate", evidence=ordinary)
+
+    structural = ComponentEvidence(
+        evidence_id="structural-contradiction",
+        component=ProtocolComponent.REQUEST,
+        kind=EvidenceKind.COUNTEREXAMPLE,
+        strength=EvidenceStrength.LOGICAL,
+        generation_id=1,
+        request_hash="r",
+        response_hash="s",
+        observation="candidate wire contradicts a nonce-bound structural fact",
+        contradiction_class=ContradictionClass.STRUCTURAL,
+    )
+    store.eliminate(ProtocolComponent.REQUEST, "candidate", evidence=structural)
+    assert store.is_eliminated(ProtocolComponent.REQUEST, "candidate")
 
 
 class AtomicCounterexampleEndpoint(GeneratedHoldoutEndpoint):

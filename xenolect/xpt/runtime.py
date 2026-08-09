@@ -62,6 +62,7 @@ from xenolect.xpt.gauntlet import (
     mint_instance,
 )
 from xenolect.xpt.hypothesis import (
+    ContradictionClass,
     ObligationDirectedPlanner,
     PartialProtocolHypothesis,
     ProtocolComponent,
@@ -79,12 +80,16 @@ from xenolect.xpt.planner import (
     probe_succeeded,
 )
 from xenolect.xpt.protocol_synthesis import (
+    WitnessPhase,
+    component_observation_evidence,
     counterexample_evidence,
     discover_request_program_from_example,
     discover_tool_result_program_from_example,
     evidence_from_counterexample,
     extract_counterexample,
-    proof_evidence,
+    negative_behavior_evidence,
+    obligation_support_evidence,
+    obligation_witness_evidence,
     synthesize_request_program,
     synthesize_tool_result_program,
 )
@@ -413,6 +418,7 @@ class XptCompiler:
                 "the paid G1 wire did not expose the catalog structure required by "
                 "the endpoint's nonce-bound request constraints"
             ),
+            contradiction_class=ContradictionClass.STRUCTURAL,
         )
         self.synthesis_report.evidence.eliminate(
             ProtocolComponent.REQUEST,
@@ -468,33 +474,29 @@ class XptCompiler:
                 syn = candidate_syn
                 paid = candidate_paid
                 break
-            candidate_rejected = counterexample_evidence(
+            candidate_rejected = negative_behavior_evidence(
                 component=ProtocolComponent.REQUEST,
                 generation=candidate_paid,
                 observation=("this exact request candidate did not elicit a conformant G1 batch"),
             )
-            self.synthesis_report.evidence.eliminate(
-                ProtocolComponent.REQUEST,
-                candidate.component_fingerprint(ProtocolComponent.REQUEST),
-                evidence=candidate_rejected,
-            )
+            self.synthesis_report.evidence.record(candidate_rejected)
         if refined is None or active_branch is None or syn is None or paid is None:
             self._active_failure = "bounded request candidates did not satisfy the G1 obligations"
             self.synthesis_report.failure = self._active_failure
             return None, True
 
-        request_proof = proof_evidence(
+        request_fact = component_observation_evidence(
             component=ProtocolComponent.REQUEST,
             generation=paid,
             observation=("synthesized request program elicited the exact three-call G1 batch"),
         )
-        self.synthesis_report.evidence.record(request_proof)
+        self.synthesis_report.evidence.record(request_fact)
         self.synthesis_report.record_revision(
             hypothesis,
             refined,
             component=ProtocolComponent.REQUEST,
             generation_id=paid.index,
-            evidence_ids=[row.evidence_id for row in constraint_rows] + [request_proof.evidence_id],
+            evidence_ids=[row.evidence_id for row in constraint_rows] + [request_fact.evidence_id],
             reason=(
                 "composed structural parameters locally and selected the first "
                 "lowest-complexity message placement proven by G1"
@@ -515,7 +517,7 @@ class XptCompiler:
             self.synthesis_report.failure = self._active_failure
             return None, True
         response_refined = refined.refine(ProtocolComponent.RESPONSE, response_program)
-        response_proof = proof_evidence(
+        response_fact = component_observation_evidence(
             component=ProtocolComponent.RESPONSE,
             generation=paid,
             observation=(
@@ -523,13 +525,36 @@ class XptCompiler:
                 "and call-ID discipline"
             ),
         )
-        self.synthesis_report.evidence.record(response_proof)
+        self.synthesis_report.evidence.record(response_fact)
+        g1_evidence_ids = (request_fact.evidence_id, response_fact.evidence_id)
+        for support in obligation_support_evidence(
+            obligation_ids=("OB07", "OB08", "OB09", "OB12", "OB17", "OB18"),
+            generations=(paid,),
+            component_evidence_ids=g1_evidence_ids,
+            observation=(
+                "G1 is relevant to these obligations but does not contain their "
+                "complete multi-turn witness"
+            ),
+        ):
+            self.synthesis_report.evidence.record_support(support)
+        g1_witnesses = obligation_witness_evidence(
+            obligation_ids=("OB01", "OB02", "OB03", "OB04", "OB05", "OB06"),
+            phase=WitnessPhase.G1,
+            generations=(paid,),
+            component_evidence_ids=g1_evidence_ids,
+            observation=(
+                "the exact G1 batch contains offered names, schema-valid exact "
+                "arguments, nested schema use, and one parallel call turn"
+            ),
+        )
+        for witness in g1_witnesses:
+            self.synthesis_report.evidence.record_witness(witness)
         self.synthesis_report.record_revision(
             refined,
             response_refined,
             component=ProtocolComponent.RESPONSE,
             generation_id=paid.index,
-            evidence_ids=[response_proof.evidence_id],
+            evidence_ids=[response_fact.evidence_id],
             reason=(
                 "reused the paid G1 bytes to infer and validate one bounded response "
                 "primitive without another endpoint call"
@@ -540,7 +565,7 @@ class XptCompiler:
             generation=paid.index,
             request_fingerprint=response_refined.component_fingerprint(ProtocolComponent.REQUEST),
             response_fingerprint=response_refined.component_fingerprint(ProtocolComponent.RESPONSE),
-            obligations=list(request_proof.obligation_ids),
+            obligations=[witness.obligation_id for witness in g1_witnesses],
             succeeded=True,
         )
         return (
@@ -559,7 +584,7 @@ class XptCompiler:
     # ------------------------------------------------------------------
 
     def _frontier_evidence(self, tried: set[str]) -> FrontierEvidence:
-        """Build replanner evidence from the live session + SAFE eliminations.
+        """Build replanner evidence from paid observations and explicit trials.
 
         ``tried`` is the set of *evaluated* RequestConfig keys (SAFE), not
         "every wire sibling we might never need to pay for again."
@@ -590,12 +615,9 @@ class XptCompiler:
     def _wire_class_keys(self, cfg: RequestConfig) -> list[str]:
         """RequestConfig keys that emit the exact same G1 request as ``cfg``.
 
-        SAFE justification (frozen grammar): RequestConfig only sets
-        tool_encoding + schema_transforms; G1 wire is a pure function of those
-        fields on the gauntlet tool set. Equal wire hash ⇒ equal G1 observation.
-        Parser / tool_result_encoding are not part of RequestConfig (resolved
-        later by free parse + counterfactual fork). Therefore wire-identical
-        RequestConfigs form one diagnosis experiment class.
+        Equality permits observation reuse and experiment-cost ranking. It does
+        not make a stochastic response repeatable, so it is not itself a SAFE
+        hypothesis-elimination rule.
         """
         target = g1_fingerprint(cfg, seed=self.seed).full_hash
         return [
@@ -605,7 +627,7 @@ class XptCompiler:
         ]
 
     def _mark_g1_wire(self, cfg: RequestConfig, *, ok: bool) -> str:
-        """Fingerprint the G1 request; on failure SAFE-eliminate the wire class."""
+        """Fingerprint G1 and retain failures as heuristic ranking evidence."""
         fp = g1_fingerprint(cfg, seed=self.seed)
         if not hasattr(self, "_traj_failed_wires"):
             self._traj_failed_wires = set()
@@ -625,15 +647,28 @@ class XptCompiler:
         self._wire_fingerprints[fp.full_hash] = fp
         self._traj_failed_wires.add(fp.full_hash)
 
-    def _safe_eliminate_wire_class(self, cfg: RequestConfig, *, reason: str) -> None:
-        """SAFE: eliminate every RequestConfig with the same exact G1 wire as ``cfg``."""
+    def _safe_eliminate_wire_class(
+        self,
+        cfg: RequestConfig,
+        *,
+        reason: str,
+        contradiction_class: ContradictionClass,
+    ) -> None:
+        """Eliminate a wire class only after a deterministic contradiction."""
+        if contradiction_class not in {
+            ContradictionClass.STRUCTURAL,
+            ContradictionClass.WIRE_API,
+            ContradictionClass.PARSER_SCHEMA,
+        }:
+            raise ValueError("ordinary model behavior is not a SAFE wire-class elimination")
         if not hasattr(self, "_safe_eliminated"):
             self._safe_eliminated = set()
         keys = self._wire_class_keys(cfg)
         for key in keys:
             self._safe_eliminated.add(key)
         self.session.ledger.note(
-            f"SAFE eliminate G1 wire class of {cfg.key} ({len(keys)} configs): {reason}"
+            "SAFE deterministic elimination of G1 wire class "
+            f"{cfg.key} ({len(keys)} configs): {reason}"
         )
 
     def _candidate_configs(self):
@@ -681,10 +716,6 @@ class XptCompiler:
                 yield _Trajectory(branch, probe.config, syn, branch.freeze())
                 exited_early = True
                 break
-            if not ok and probe.kind == "gauntlet_turn1":
-                # SAFE: same G1 wire ⇒ same observation under the frozen grammar.
-                for key in self._wire_class_keys(probe.config):
-                    tried.add(key)
             child = node.children.get(obs)
             if child is None:
                 self.left_dag = True
@@ -720,8 +751,6 @@ class XptCompiler:
                     yield _Trajectory(branch, cfg, syn, branch.freeze())
                 else:
                     self.left_dag = True
-                    for key in self._wire_class_keys(cfg):
-                        tried.add(key)
 
         # Open-world continuation: replan over remaining wire-distinct configs.
         # Complexity must not decide which expensive request is sent next.
@@ -731,9 +760,8 @@ class XptCompiler:
             # top-level compiler so it is reported as BUDGET_EXHAUSTED or
             # ENDPOINT_TOO_SLOW rather than UNSUPPORTED.
             self.session.check_can_explore()
-            # Merge SAFE eliminations recorded by run() after a yielded trajectory
-            # fails (trajectory / certification) — generator-local `tried` alone
-            # cannot see those events.
+            # Merge only explicit deterministic eliminations. Ordinary G1,
+            # trajectory, and certification failures remain ranking evidence.
             tried |= getattr(self, "_safe_eliminated", set())
             remaining = [c for c in all_request_configs() if c.key not in tried]
             if not remaining:
@@ -746,9 +774,8 @@ class XptCompiler:
                 )
                 return
             cfg, selection = picked
-            # Evaluate the representative only. Wire siblings stay live until a
-            # SAFE post-evaluation rule eliminates the wire class (equal G1
-            # request ⇒ equal observation under the frozen grammar).
+            # Evaluate one representative. Equal wires share cost features but
+            # remain live unless deterministic protocol evidence rejects them.
             self._reason = selection.reason
             self.session.ledger.decide(
                 phase="frontier-replan",
@@ -780,20 +807,14 @@ class XptCompiler:
                     yield active
                 return
             if ok:
-                # G1 success: only this config is "in flight". Siblings with the
-                # same wire remain candidates only if this trajectory fails and
-                # we would re-select — SAFE rule then eliminates the whole class
-                # after a full trajectory/cert failure (continuation equivalence).
+                # G1 success: only this exact config is in flight.
                 tried.add(cfg.key)
                 yield _Trajectory(branch, cfg, syn, branch.freeze())
             else:
-                # SAFE: same G1 request would produce the same raw response;
-                # eliminate the entire exact-wire RequestConfig class.
-                for key in self._wire_class_keys(cfg):
-                    tried.add(key)
+                tried.add(cfg.key)
                 self.session.ledger.note(
-                    f"SAFE eliminate wire class of {cfg.key} after G1 failure "
-                    f"({len(self._wire_class_keys(cfg))} RequestConfigs share this G1 request)"
+                    f"negative G1 behavior for {cfg.key}; retained only as "
+                    "heuristic evidence because the endpoint may be stochastic"
                 )
 
     # ------------------------------------------------------------------
@@ -1122,6 +1143,11 @@ class XptCompiler:
         hypothesis = traj.active_hypothesis
         if hypothesis is None:
             return None
+        generation1 = traj.branch.last_generation
+        if generation1 is None:
+            self._active_failure = "active result synthesis has no G1 witness generation"
+            self.synthesis_report.failure = self._active_failure
+            return None
         experiment = self.obligation_planner.choose(hypothesis, self.synthesis_report.evidence)
         if experiment is None or experiment.component != ProtocolComponent.TOOL_RESULT:
             self._active_failure = "obligation planner did not select the result hole"
@@ -1151,7 +1177,7 @@ class XptCompiler:
 
         selected = baseline_hypothesis
         if ok:
-            proof = proof_evidence(
+            result_fact = component_observation_evidence(
                 component=ProtocolComponent.TOOL_RESULT,
                 generation=generation,
                 observation=(
@@ -1159,13 +1185,13 @@ class XptCompiler:
                     "the exact G2 recovery batch"
                 ),
             )
-            self.synthesis_report.evidence.record(proof)
+            self.synthesis_report.evidence.record(result_fact)
             self.synthesis_report.record_revision(
                 hypothesis,
                 selected,
                 component=ProtocolComponent.TOOL_RESULT,
                 generation_id=generation.index,
-                evidence_ids=[proof.evidence_id],
+                evidence_ids=[result_fact.evidence_id],
                 reason="accepted the lowest-complexity result renderer proven by G2",
             )
         else:
@@ -1228,6 +1254,7 @@ class XptCompiler:
                     "minimal renderer failed result consumption and the endpoint returned "
                     "nonce-bound tool-result constraints"
                 ),
+                contradiction_class=ContradictionClass.STRUCTURAL,
             )
             self.synthesis_report.evidence.eliminate(
                 ProtocolComponent.TOOL_RESULT,
@@ -1252,7 +1279,7 @@ class XptCompiler:
                 if ok:
                     selected = candidate
                     break
-                candidate_rejected = counterexample_evidence(
+                candidate_rejected = negative_behavior_evidence(
                     component=ProtocolComponent.TOOL_RESULT,
                     generation=generation,
                     observation=(
@@ -1260,16 +1287,12 @@ class XptCompiler:
                         "into the G2 recovery batch"
                     ),
                 )
-                self.synthesis_report.evidence.eliminate(
-                    ProtocolComponent.TOOL_RESULT,
-                    candidate.component_fingerprint(ProtocolComponent.TOOL_RESULT),
-                    evidence=candidate_rejected,
-                )
+                self.synthesis_report.evidence.record(candidate_rejected)
             if selected is hypothesis or not ok:
                 self._active_failure = "synthesized tool-result renderer did not satisfy G2"
                 self.synthesis_report.failure = self._active_failure
                 return None
-            proof = proof_evidence(
+            result_fact = component_observation_evidence(
                 component=ProtocolComponent.TOOL_RESULT,
                 generation=generation,
                 observation=(
@@ -1277,13 +1300,14 @@ class XptCompiler:
                     "exact G2 recovery batch"
                 ),
             )
-            self.synthesis_report.evidence.record(proof)
+            self.synthesis_report.evidence.record(result_fact)
             self.synthesis_report.record_revision(
                 hypothesis,
                 selected,
                 component=ProtocolComponent.TOOL_RESULT,
                 generation_id=generation.index,
-                evidence_ids=[row.evidence_id for row in constraint_rows] + [proof.evidence_id],
+                evidence_ids=[row.evidence_id for row in constraint_rows]
+                + [result_fact.evidence_id],
                 reason=(
                     "refined only the result renderer; all template parameters came "
                     "from the paid fresh-sentinel example, and request/response "
@@ -1291,12 +1315,34 @@ class XptCompiler:
                 ),
             )
 
-        response_proof = proof_evidence(
+        response_fact = component_observation_evidence(
             component=ProtocolComponent.RESPONSE,
             generation=generation,
             observation="the unchanged response program parsed the exact G2 batch",
         )
-        self.synthesis_report.evidence.record(response_proof)
+        self.synthesis_report.evidence.record(response_fact)
+        g2_evidence_ids = (result_fact.evidence_id, response_fact.evidence_id)
+        all_calls = tuple(traj.syndrome.accepted_calls) + tuple(calls)
+        call_ids = [call.id for call in all_calls]
+        present_ids = [call_id for call_id in call_ids if call_id is not None]
+        g2_witness_ids = ["OB07", "OB10", "OB11", "OB13", "OB14"]
+        if call_ids and len(present_ids) in {0, len(call_ids)}:
+            g2_witness_ids.append("OB08")
+        if len(set(present_ids)) == len(present_ids):
+            g2_witness_ids.append("OB09")
+        g2_witnesses = obligation_witness_evidence(
+            obligation_ids=tuple(g2_witness_ids),
+            phase=WitnessPhase.G2,
+            generations=(generation1, generation),
+            component_evidence_ids=g2_evidence_ids,
+            observation=(
+                "G1 plus the exact G2 recovery batch completely witnesses call "
+                "cardinality, ID discipline, result association, error consumption, "
+                "and recovery for the listed obligations"
+            ),
+        )
+        for witness in g2_witnesses:
+            self.synthesis_report.evidence.record_witness(witness)
         for call in calls:
             fork.add_tool_result(
                 call_id=call.id,
@@ -1330,7 +1376,17 @@ class XptCompiler:
             self._active_failure = "synthesized protocol failed G3 termination"
             self.synthesis_report.failure = self._active_failure
             return None
-        termination_proof = proof_evidence(
+        request_termination_fact = component_observation_evidence(
+            component=ProtocolComponent.REQUEST,
+            generation=generation3,
+            observation="the unchanged request program elicited no spurious G3 tool call",
+        )
+        response_termination_fact = component_observation_evidence(
+            component=ProtocolComponent.RESPONSE,
+            generation=generation3,
+            observation="the response program parsed exact final text with no tool calls",
+        )
+        result_termination_fact = component_observation_evidence(
             component=ProtocolComponent.TOOL_RESULT,
             generation=generation3,
             observation=(
@@ -1338,7 +1394,29 @@ class XptCompiler:
                 "exact no-call acknowledgement"
             ),
         )
-        self.synthesis_report.evidence.record(termination_proof)
+        for fact in (
+            request_termination_fact,
+            response_termination_fact,
+            result_termination_fact,
+        ):
+            self.synthesis_report.evidence.record(fact)
+        g3_witnesses = obligation_witness_evidence(
+            obligation_ids=("OB12", "OB15", "OB16", "OB17"),
+            phase=WitnessPhase.G3,
+            generations=(generation1, generation, generation3),
+            component_evidence_ids=(
+                request_termination_fact.evidence_id,
+                response_termination_fact.evidence_id,
+                result_termination_fact.evidence_id,
+            ),
+            observation=(
+                "the full three-turn diagnosis trace completed two result cycles, "
+                "had no spurious final call, terminated with exact text, and parsed "
+                "without ambiguity"
+            ),
+        )
+        for witness in g3_witnesses:
+            self.synthesis_report.evidence.record_witness(witness)
         self.synthesis_report.final_hypothesis = selected
         self.synthesis_report.failure = None
         traj.branch = fork
@@ -1462,9 +1540,9 @@ class XptCompiler:
                 if driver is None:
                     if traj.active_hypothesis is None:
                         self._mark_trajectory_failed(traj.config)
-                        self._safe_eliminate_wire_class(
-                            traj.config,
-                            reason="stateful trajectory failed after G1",
+                        self.session.ledger.note(
+                            "stateful trajectory failure retained as negative behavioral "
+                            f"evidence for {traj.config.key}; no SAFE elimination"
                         )
                     continue
                 if traj.active_hypothesis is None:
@@ -1541,10 +1619,12 @@ class XptCompiler:
                     if traj.active_hypothesis is not None:
                         self.synthesis_report.certification = {
                             "passed": True,
+                            "authority": "independent_certification",
                             "fresh_instance": True,
                             "production_runtime": True,
                             "generations": run.generations,
                             "mandatory_coverage": run.certificate.mandatory_coverage,
+                            "certificate": run.certificate.as_dict(),
                             "reason": (
                                 "the final unchanged Driver survived all mandatory ABI "
                                 "obligations on the independent production-runtime run"
@@ -1585,9 +1665,9 @@ class XptCompiler:
                 result.certificate = run.certificate
                 if traj.active_hypothesis is None:
                     self._mark_trajectory_failed(traj.config)
-                    self._safe_eliminate_wire_class(
-                        traj.config,
-                        reason=(f"independent certification failed: {last_failed_obligations}"),
+                    self.session.ledger.note(
+                        "independent certification failure retained as negative behavioral "
+                        f"evidence for {traj.config.key}: {last_failed_obligations}"
                     )
                 else:
                     self.synthesis_report.failure = (
@@ -1596,10 +1676,12 @@ class XptCompiler:
                     )
                     self.synthesis_report.certification = {
                         "passed": False,
+                        "authority": "independent_certification",
                         "fresh_instance": True,
                         "production_runtime": True,
                         "generations": run.generations,
                         "failed_obligations": list(last_failed_obligations),
+                        "certificate": run.certificate.as_dict(),
                     }
         except DeadlineExceeded as exc:
             result.status = ENDPOINT_TOO_SLOW

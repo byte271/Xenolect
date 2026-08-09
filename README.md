@@ -53,9 +53,9 @@ XPT can make a bounded response-synthesis step beyond that fixed grammar: when t
 The current development milestone adds the smallest active request/result synthesis foundation:
 
 - a partial hypothesis contains executable v0.2 primitives plus typed request, response, or tool-result holes;
-- each paid observation is decomposed into nonce-bound structural facts, counterexamples, and component proofs that later candidates can reuse;
+- each paid observation is decomposed into nonce-bound component facts, obligation support, complete turn-scoped obligation witnesses, and independent certification evidence. Component success never inherits every obligation merely attributed to that component;
 - the Tool ABI obligation-to-Driver-component map directs the next experiment to the unresolved or contradicted component;
-- only logical evidence may eliminate a candidate; novelty, complexity, expected obligation gain, and cost are ranking signals only;
+- only deterministic structural contradictions, wire/API rejections, or parser/schema contradictions may eliminate a candidate. Ordinary model non-compliance is reusable negative evidence but cannot prove impossibility; novelty, complexity, expected obligation gain, and cost are ranking signals only;
 - one generic request primitive can render a tool catalog in a separate system or user message, with a bounded nested JSON wrapper, custom tool-definition fields, and custom call framing/fields. XPT can infer those parameters from a rejected-wire response containing one unambiguous catalog example and one nonce-bound call example; only the unobservable message placement is tested as a bounded typed choice;
 - the existing segmented `ToolResultMessage` primitive can be synthesized by locating the known tool name, call ID, and freshly minted result content inside an observed result-wire example. Literal segments are recovered locally; only bounded message placement choices require further generations;
 - a result-consumption counterexample changes only the result component. Proven request/response component fingerprints remain live;
@@ -65,7 +65,7 @@ The active path is deliberately narrow. A request-side rejection must expose one
 
 The falsifiable milestone claim is: **XPT can actively synthesize and independently certify a previously unseen request + response + tool-result protocol program from black-box observations within the existing bounded compilation budget.** It is not a claim of universal or arbitrary protocol synthesis. Every compile remains inside the same 12-generation and 300-second defaults with three generations reserved for certification.
 
-The compile report includes every component constraint with its generation/request/response witness, every proof-only elimination, each obligation-directed experiment, component fingerprints before and after refinement, and the independent certification result.
+The compile report separates component facts, supporting obligation evidence, complete diagnosis witnesses, deterministic eliminations, and the independent certification certificate. G1 evidence cannot prove history preservation, error recovery, no-call termination, final text, or legal completion of the full ABI trace. The report also retains each obligation-directed experiment and component fingerprint revision.
 
 The diagnostic tools used during `xenolect install` are temporary conformance probes. They are not the tools your app later uses. At runtime, Xenolect transforms the real tools supplied by your app according to the installed Driver.
 

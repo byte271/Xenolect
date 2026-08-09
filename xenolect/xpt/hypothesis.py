@@ -191,15 +191,31 @@ class EvidenceStrength(StrEnum):
 
 
 class EvidenceKind(StrEnum):
-    OBSERVATION = "observation"
-    CONSTRAINT = "constraint"
+    STRUCTURAL_FACT = "structural_fact"
+    COMPONENT_OBSERVATION = "component_observation"
+    NEGATIVE_BEHAVIOR = "negative_behavior"
     COUNTEREXAMPLE = "counterexample"
-    PROOF = "proof"
+
+
+class ContradictionClass(StrEnum):
+    """Why an observation can or cannot soundly eliminate a candidate."""
+
+    STRUCTURAL = "deterministic_structural_contradiction"
+    WIRE_API = "deterministic_wire_api_rejection"
+    PARSER_SCHEMA = "parser_schema_contradiction"
+    ORDINARY_BEHAVIOR = "ordinary_negative_model_behavior"
+
+
+_SAFE_ELIMINATION_CLASSES = {
+    ContradictionClass.STRUCTURAL,
+    ContradictionClass.WIRE_API,
+    ContradictionClass.PARSER_SCHEMA,
+}
 
 
 @dataclass(frozen=True)
 class ComponentEvidence:
-    """One reusable fact about an individual protocol component."""
+    """One reusable fact about a component, never an obligation proof."""
 
     evidence_id: str
     component: ProtocolComponent
@@ -211,7 +227,8 @@ class ComponentEvidence:
     observation: str
     constraint_path: str | None = None
     expected: Any = None
-    obligation_ids: tuple[str, ...] = ()
+    contradiction_class: ContradictionClass | None = None
+    determinism_assumption: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -225,7 +242,68 @@ class ComponentEvidence:
             "observation": self.observation,
             "constraint_path": self.constraint_path,
             "expected": self.expected,
-            "obligation_ids": list(self.obligation_ids),
+            "contradiction_class": (
+                self.contradiction_class.value if self.contradiction_class else None
+            ),
+            "determinism_assumption": self.determinism_assumption,
+        }
+
+
+@dataclass(frozen=True)
+class ObligationSupport:
+    """Evidence relevant to an obligation but insufficient to prove it."""
+
+    support_id: str
+    obligation_id: str
+    generation_ids: tuple[int, ...]
+    component_evidence_ids: tuple[str, ...]
+    observation: str
+
+    def __post_init__(self) -> None:
+        if self.obligation_id not in {obligation.id for obligation in OBLIGATIONS}:
+            raise ValueError(f"unknown obligation {self.obligation_id!r}")
+        if not self.generation_ids:
+            raise ValueError("obligation support requires at least one generation")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "support_id": self.support_id,
+            "obligation_id": self.obligation_id,
+            "status": "SUPPORTING",
+            "generation_ids": list(self.generation_ids),
+            "component_evidence_ids": list(self.component_evidence_ids),
+            "observation": self.observation,
+        }
+
+
+@dataclass(frozen=True)
+class ObligationWitness:
+    """A complete diagnosis witness for exactly one obligation."""
+
+    witness_id: str
+    obligation_id: str
+    generation_ids: tuple[int, ...]
+    component_evidence_ids: tuple[str, ...]
+    observation: str
+    scope: str = "diagnosis"
+
+    def __post_init__(self) -> None:
+        if self.obligation_id not in {obligation.id for obligation in OBLIGATIONS}:
+            raise ValueError(f"unknown obligation {self.obligation_id!r}")
+        if not self.generation_ids:
+            raise ValueError("complete obligation witness requires observed generations")
+        if self.scope != "diagnosis":
+            raise ValueError("independent certification has its own certificate boundary")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "witness_id": self.witness_id,
+            "obligation_id": self.obligation_id,
+            "status": "PROVEN",
+            "scope": self.scope,
+            "generation_ids": list(self.generation_ids),
+            "component_evidence_ids": list(self.component_evidence_ids),
+            "observation": self.observation,
         }
 
 
@@ -246,15 +324,31 @@ def attributed_obligations(component: ProtocolComponent) -> tuple[str, ...]:
 
 @dataclass
 class EvidenceStore:
-    """Reusable evidence with proof-only candidate elimination."""
+    """Reusable facts, obligation support/witnesses, and SAFE eliminations."""
 
     rows: list[ComponentEvidence] = field(default_factory=list)
+    obligation_support: list[ObligationSupport] = field(default_factory=list)
+    obligation_witnesses: list[ObligationWitness] = field(default_factory=list)
     eliminated: dict[ProtocolComponent, set[str]] = field(default_factory=dict)
 
     def record(self, evidence: ComponentEvidence) -> None:
         if any(row.evidence_id == evidence.evidence_id for row in self.rows):
             return
         self.rows.append(evidence)
+
+    def record_support(self, evidence: ObligationSupport) -> None:
+        if any(row.support_id == evidence.support_id for row in self.obligation_support):
+            return
+        self.obligation_support.append(evidence)
+
+    def record_witness(self, evidence: ObligationWitness) -> None:
+        if any(row.witness_id == evidence.witness_id for row in self.obligation_witnesses):
+            return
+        self.obligation_witnesses.append(evidence)
+
+    @property
+    def proven_obligation_ids(self) -> set[str]:
+        return {row.obligation_id for row in self.obligation_witnesses}
 
     def eliminate(
         self,
@@ -263,14 +357,18 @@ class EvidenceStore:
         *,
         evidence: ComponentEvidence,
     ) -> None:
-        """Eliminate only from a logical counterexample, never a ranking score."""
+        """Eliminate only from a deterministic logical contradiction."""
         if evidence.component != component:
             raise ValueError("component evidence cannot eliminate an unrelated component")
-        if evidence.strength != EvidenceStrength.LOGICAL or evidence.kind not in {
-            EvidenceKind.COUNTEREXAMPLE,
-            EvidenceKind.CONSTRAINT,
-        }:
+        if evidence.strength != EvidenceStrength.LOGICAL:
             raise ValueError("heuristic evidence cannot eliminate a protocol hypothesis")
+        if evidence.kind != EvidenceKind.COUNTEREXAMPLE:
+            raise ValueError("component facts and positive observations cannot eliminate")
+        if evidence.contradiction_class not in _SAFE_ELIMINATION_CLASSES:
+            raise ValueError(
+                "ordinary model behavior cannot eliminate without an explicit "
+                "deterministic contradiction"
+            )
         self.record(evidence)
         self.eliminated.setdefault(component, set()).add(candidate_fingerprint)
 
@@ -283,6 +381,9 @@ class EvidenceStore:
     def as_dict(self) -> dict[str, Any]:
         return {
             "rows": [row.as_dict() for row in self.rows],
+            "component_facts": [row.as_dict() for row in self.rows],
+            "obligation_support": [row.as_dict() for row in self.obligation_support],
+            "obligation_witnesses": [row.as_dict() for row in self.obligation_witnesses],
             "logical_eliminations": {
                 component.value: sorted(values)
                 for component, values in sorted(
@@ -332,18 +433,13 @@ class ObligationDirectedPlanner:
         def constrained(component: ProtocolComponent) -> bool:
             return any(
                 row.strength == EvidenceStrength.LOGICAL
-                and row.kind in {EvidenceKind.CONSTRAINT, EvidenceKind.COUNTEREXAMPLE}
+                and row.kind in {EvidenceKind.STRUCTURAL_FACT, EvidenceKind.COUNTEREXAMPLE}
                 for row in evidence.for_component(component)
             )
 
         def remaining(component: ProtocolComponent) -> tuple[str, ...]:
             required = attributed_obligations(component)
-            proven = {
-                obligation_id
-                for row in evidence.for_component(component)
-                if row.kind == EvidenceKind.PROOF
-                for obligation_id in row.obligation_ids
-            }
+            proven = evidence.proven_obligation_ids
             return tuple(value for value in required if value not in proven)
 
         # Dependency order is required for executable experiments.  Obligation

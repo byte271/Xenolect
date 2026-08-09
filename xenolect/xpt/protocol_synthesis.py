@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from xenolect.abi.events import ToolDef, ToolResult
@@ -30,10 +31,12 @@ from xenolect.driver.ir import (
 from xenolect.driver.parse import iter_json_objects
 from xenolect.xpt.hypothesis import (
     ComponentEvidence,
+    ContradictionClass,
     EvidenceKind,
     EvidenceStrength,
+    ObligationSupport,
+    ObligationWitness,
     ProtocolComponent,
-    attributed_obligations,
 )
 from xenolect.xpt.session import Generation
 
@@ -752,7 +755,6 @@ def evidence_from_counterexample(
     """Convert every atomic equality into a reusable auditable evidence row."""
     if not observation.ok or observation.component is None:
         return []
-    obligations = attributed_obligations(observation.component)
     rows: list[ComponentEvidence] = []
     for constraint in observation.constraints:
         material = json.dumps(
@@ -772,7 +774,7 @@ def evidence_from_counterexample(
             ComponentEvidence(
                 evidence_id=evidence_id,
                 component=observation.component,
-                kind=EvidenceKind.CONSTRAINT,
+                kind=EvidenceKind.STRUCTURAL_FACT,
                 strength=EvidenceStrength.LOGICAL,
                 generation_id=generation.index,
                 request_hash=generation.request_hash,
@@ -782,13 +784,12 @@ def evidence_from_counterexample(
                 ),
                 constraint_path=constraint.path,
                 expected=constraint.expected,
-                obligation_ids=obligations,
             )
         )
     return rows
 
 
-def proof_evidence(
+def component_observation_evidence(
     *,
     component: ProtocolComponent,
     generation: Generation,
@@ -801,13 +802,12 @@ def proof_evidence(
     return ComponentEvidence(
         evidence_id="ev_" + hashlib.sha256(material).hexdigest()[:12],
         component=component,
-        kind=EvidenceKind.PROOF,
+        kind=EvidenceKind.COMPONENT_OBSERVATION,
         strength=EvidenceStrength.LOGICAL,
         generation_id=generation.index,
         request_hash=generation.request_hash,
         response_hash=generation.response_hash,
         observation=observation,
-        obligation_ids=attributed_obligations(component),
     )
 
 
@@ -816,6 +816,8 @@ def counterexample_evidence(
     component: ProtocolComponent,
     generation: Generation,
     observation: str,
+    contradiction_class: ContradictionClass,
+    determinism_assumption: str | None = None,
 ) -> ComponentEvidence:
     material = (
         f"{generation.index}|{component.value}|{generation.request_hash}|"
@@ -830,5 +832,138 @@ def counterexample_evidence(
         request_hash=generation.request_hash,
         response_hash=generation.response_hash,
         observation=observation,
-        obligation_ids=attributed_obligations(component),
+        contradiction_class=contradiction_class,
+        determinism_assumption=determinism_assumption,
     )
+
+
+def negative_behavior_evidence(
+    *,
+    component: ProtocolComponent,
+    generation: Generation,
+    observation: str,
+) -> ComponentEvidence:
+    """Record model non-compliance without treating it as impossibility proof."""
+    material = (
+        f"{generation.index}|{component.value}|{generation.request_hash}|"
+        f"{generation.response_hash}|negative-behavior|{observation}"
+    ).encode()
+    return ComponentEvidence(
+        evidence_id="ev_" + hashlib.sha256(material).hexdigest()[:12],
+        component=component,
+        kind=EvidenceKind.NEGATIVE_BEHAVIOR,
+        strength=EvidenceStrength.HEURISTIC,
+        generation_id=generation.index,
+        request_hash=generation.request_hash,
+        response_hash=generation.response_hash,
+        observation=observation,
+        contradiction_class=ContradictionClass.ORDINARY_BEHAVIOR,
+    )
+
+
+class WitnessPhase(StrEnum):
+    G1 = "G1"
+    G2 = "G2"
+    G3 = "G3"
+
+
+_PHASE_RANK = {WitnessPhase.G1: 1, WitnessPhase.G2: 2, WitnessPhase.G3: 3}
+_EARLIEST_COMPLETE_WITNESS: dict[str, WitnessPhase | None] = {
+    "OB01": WitnessPhase.G1,
+    "OB02": WitnessPhase.G1,
+    "OB03": WitnessPhase.G1,
+    "OB04": WitnessPhase.G1,
+    "OB05": WitnessPhase.G1,
+    "OB06": WitnessPhase.G1,
+    "OB07": WitnessPhase.G2,
+    "OB08": WitnessPhase.G2,
+    "OB09": WitnessPhase.G2,
+    "OB10": WitnessPhase.G2,
+    "OB11": WitnessPhase.G2,
+    "OB12": WitnessPhase.G3,
+    "OB13": WitnessPhase.G2,
+    "OB14": WitnessPhase.G2,
+    "OB15": WitnessPhase.G3,
+    "OB16": WitnessPhase.G3,
+    "OB17": WitnessPhase.G3,
+    # A completed-trace validator, not component success, decides OB18.  Only
+    # independent certification records it in this milestone.
+    "OB18": None,
+}
+
+
+def _obligation_material(
+    prefix: str,
+    obligation_id: str,
+    generations: tuple[Generation, ...],
+    observation: str,
+) -> bytes:
+    return json.dumps(
+        {
+            "prefix": prefix,
+            "obligation": obligation_id,
+            "generations": [generation.index for generation in generations],
+            "requests": [generation.request_hash for generation in generations],
+            "responses": [generation.response_hash for generation in generations],
+            "observation": observation,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
+def obligation_support_evidence(
+    *,
+    obligation_ids: tuple[str, ...],
+    generations: tuple[Generation, ...],
+    component_evidence_ids: tuple[str, ...],
+    observation: str,
+) -> tuple[ObligationSupport, ...]:
+    """Create reusable support rows that never mark an obligation PROVEN."""
+    rows: list[ObligationSupport] = []
+    for obligation_id in obligation_ids:
+        material = _obligation_material("support", obligation_id, generations, observation)
+        rows.append(
+            ObligationSupport(
+                support_id="sup_" + hashlib.sha256(material).hexdigest()[:12],
+                obligation_id=obligation_id,
+                generation_ids=tuple(generation.index for generation in generations),
+                component_evidence_ids=component_evidence_ids,
+                observation=observation,
+            )
+        )
+    return tuple(rows)
+
+
+def obligation_witness_evidence(
+    *,
+    obligation_ids: tuple[str, ...],
+    phase: WitnessPhase,
+    generations: tuple[Generation, ...],
+    component_evidence_ids: tuple[str, ...],
+    observation: str,
+) -> tuple[ObligationWitness, ...]:
+    """Create complete witnesses only when the required trajectory exists."""
+    rows: list[ObligationWitness] = []
+    for obligation_id in obligation_ids:
+        earliest = _EARLIEST_COMPLETE_WITNESS.get(obligation_id)
+        if earliest is None:
+            raise ValueError(
+                f"{obligation_id} requires completed-trace certification, not a component proof"
+            )
+        required_rank = _PHASE_RANK[earliest]
+        if _PHASE_RANK[phase] < required_rank or len(generations) < required_rank:
+            raise ValueError(
+                f"{phase.value} does not contain a complete witness for {obligation_id}"
+            )
+        material = _obligation_material("witness", obligation_id, generations, observation)
+        rows.append(
+            ObligationWitness(
+                witness_id="wit_" + hashlib.sha256(material).hexdigest()[:12],
+                obligation_id=obligation_id,
+                generation_ids=tuple(generation.index for generation in generations),
+                component_evidence_ids=component_evidence_ids,
+                observation=observation,
+            )
+        )
+    return tuple(rows)
