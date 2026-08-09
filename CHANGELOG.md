@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-09
+
 ### Active discriminating protocol synthesis
 
 - Added explicit bounded version spaces for request and tool-result primitive properties, with controlled interventions and deterministic survivor accounting.
@@ -24,6 +26,12 @@ This stacked research milestone proves one narrow claim: XPT can design discrimi
 - Preserved v0.1 JSON/hash identity, v0.2 compatibility, the 12-generation budget, three-generation certification reserve, and 300-second deadline.
 
 This milestone proves one narrow claim: XPT can synthesize and independently certify one previously unseen request + response + tool-result program from black-box observations. It does not claim universal protocol or state-machine synthesis.
+
+### Compatibility and verification
+
+- Preserved v0.1 Driver JSON serialization and content-hash identity and retained v0.2 Driver compatibility.
+- Kept the 300-second wall-clock limit, 12-generation budget, and three-generation independent-certification reserve.
+- Verified 122 tests and all six Windows, macOS, and Linux jobs on Python 3.11 and 3.13 before release.
 
 ## 0.2.0 - 2026-08-08
 

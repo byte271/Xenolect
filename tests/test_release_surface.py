@@ -16,14 +16,14 @@ def _plain(text: str) -> str:
 
 
 def test_release_version_is_consistent() -> None:
-    assert __version__ == "0.2.0"
+    assert __version__ == "0.3.0"
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.2.0"' in pyproject
+    assert 'version = "0.3.0"' in pyproject
     readme = Path("README.md").read_text(encoding="utf-8")
-    assert readme.startswith("# Xenolect v0.2.0\n")
-    assert "xenolect-0.2.0-py3-none-any.whl" in readme
+    assert readme.startswith("# Xenolect v0.3.0\n")
+    assert "xenolect-0.3.0-py3-none-any.whl" in readme
     changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-    assert "## 0.2.0 - 2026-08-08" in changelog
+    assert "## 0.3.0 - 2026-08-09" in changelog
 
 
 def test_normal_cli_surface_does_not_expose_internal_commands() -> None:
