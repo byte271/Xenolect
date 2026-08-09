@@ -19,6 +19,14 @@ space, changes the smallest implicated property, compares behavioral deltas,
 and validates the lowest-complexity working survivor. Generic negative model
 behavior never eliminates a version.
 
+The oracle-free diagnostic path removes even that property-local requirement.
+A generic rejection activates bounded normal-wire probes containing controlled
+catalog or result alternatives. Fresh structured canaries define predicted
+outcome partitions; deterministic minimax planning chooses a probe, and only one
+exclusive parsed witness can refine the version space. Diagnostic generations
+never count as Tool ABI witnesses. The sole survivors must still pass a separate
+clean G1/G2/G3 trajectory and independent production-runtime certification.
+
 The algorithm never sees a model name, a provider name, an endpoint type, a
 candidate id or a reference answer. Its only input is observable values returned
 by `chat_completions`.
@@ -55,6 +63,16 @@ from xenolect.driver.ir import (
 from xenolect.driver.parse import parse_model_response_full
 from xenolect.driver.termination import Termination
 from xenolect.xpt.certify import certify
+from xenolect.xpt.diagnostic_probe import (
+    MAX_REQUEST_PROBES,
+    build_request_probe,
+    build_result_probe,
+    candidate_drivers_for_probe,
+    check_identifiability,
+    diagnostic_witness_evidence,
+    is_generic_invalid_request,
+    observe_probe_response,
+)
 from xenolect.xpt.discrimination import (
     ControlledExperiment,
     ProtocolRejection,
@@ -187,6 +205,7 @@ class _Trajectory:
     frozen_prefix: str
     active_hypothesis: PartialProtocolHypothesis | None = None
     discriminating: bool = False
+    oracle_free: bool = False
     request_version: RequestVersion | None = None
 
 
@@ -658,6 +677,269 @@ class XptCompiler:
             }
         )
 
+    def _fail_oracle_free(
+        self,
+        reason: str,
+        *,
+        failure_class: str = "no_working_program_found",
+    ) -> tuple[None, bool]:
+        self._active_failure = reason
+        self.synthesis_report.failure = reason
+        self.synthesis_report.failure_class = failure_class
+        self.session.ledger.note("oracle-free synthesis failed closed: " + reason)
+        return None, True
+
+    def _maybe_oracle_free_request_trajectory(
+        self,
+        probe: ProbeTemplate,
+        branch: Branch,
+        *,
+        succeeded: bool,
+    ) -> tuple[_Trajectory | None, bool]:
+        """Identify a request version using only positive normal-wire witnesses.
+
+        A generic rejection activates this path but conveys no property evidence.
+        Each paid diagnostic request multiplexes the surviving exact production
+        versions and accepts only a nonce-bound structured call predicted by one
+        outcome partition.  Silence, prose, ambiguity and generic rejection do not
+        eliminate any version.
+        """
+        if succeeded or self._active_discrimination_seen:
+            return None, False
+        initial_generation = branch.last_generation
+        if initial_generation is None or not is_generic_invalid_request(
+            initial_generation.response
+        ):
+            return None, False
+
+        self._active_discrimination_seen = True
+        self.left_dag = True
+        self.synthesis_report.discriminating = True
+        self.synthesis_report.oracle_free = True
+        initial_negative = negative_behavior_evidence(
+            component=ProtocolComponent.REQUEST,
+            generation=initial_generation,
+            observation=(
+                "an exact production candidate received a generic rejection; this "
+                "does not localize a property or eliminate sibling hypotheses"
+            ),
+        )
+        self.synthesis_report.evidence.record(initial_negative)
+
+        survivors = list(request_version_space())
+        identifiability = check_identifiability(ProtocolComponent.REQUEST, survivors)
+        self.synthesis_report.identifiability = {
+            "request": identifiability.as_dict(),
+        }
+        if not identifiability.identifiable:
+            return self._fail_oracle_free(
+                "the current request protocol family is observationally "
+                "unidentifiable under the available diagnostic probe family",
+                failure_class="observationally_unidentifiable",
+            )
+
+        for sequence in range(1, MAX_REQUEST_PROBES + 1):
+            if len(survivors) == 1:
+                break
+            diagnostic_probe, plan = build_request_probe(
+                survivors,
+                seed=self.seed,
+                sequence=sequence,
+            )
+            diagnostic_branch = self.session.new_diagnostic_branch(diagnostic_probe)
+            offered_names = {
+                alternative.witness.tool_name
+                for alternative in diagnostic_probe.alternatives
+            }
+            _, generation = diagnostic_branch.generate(
+                purpose="explore",
+                label=f"oracle-free-request-probe-{sequence}",
+                reason=(
+                    "minimax diagnostic probe over predicted positive outcome "
+                    "partitions; information score is a ranking tie-break only"
+                ),
+                offered_tool_names=offered_names,
+            )
+            outcome = observe_probe_response(
+                diagnostic_probe,
+                generation.response,
+                candidate_drivers_for_probe(survivors),
+            )
+            if outcome.outcome_key is None:
+                plan.record_outcome(outcome)
+                self.synthesis_report.probe_plans.append(plan.as_dict())
+                return self._fail_oracle_free(
+                    "the current request protocol family is observationally "
+                    "unidentifiable under the available observations: " + outcome.reason,
+                    failure_class="observationally_unidentifiable",
+                )
+
+            evidence = diagnostic_witness_evidence(
+                component=ProtocolComponent.REQUEST,
+                generation=generation,
+                plan=plan,
+                outcome=outcome,
+            )
+            plan.record_outcome(outcome, evidence_id=evidence.evidence_id)
+            removed = set(plan.hypotheses_removed)
+            self.synthesis_report.evidence.eliminate_by_diagnostic_partition(
+                ProtocolComponent.REQUEST,
+                removed,
+                evidence=evidence,
+            )
+            self.synthesis_report.probe_plans.append(plan.as_dict())
+            remaining = set(plan.hypotheses_remaining)
+            survivors = [
+                version for version in survivors if version.fingerprint in remaining
+            ]
+            self.session.ledger.decide(
+                phase="oracle-free-request-partition",
+                generation=generation.index,
+                probe=plan.probe_id,
+                observed_outcome=outcome.outcome_key,
+                witness_ids=list(outcome.witness_ids),
+                removed=sorted(removed),
+                remaining=sorted(remaining),
+                elimination_basis="exclusive_nonce_bound_structured_witness",
+            )
+
+        if len(survivors) != 1:
+            return self._fail_oracle_free(
+                "the bounded request diagnostic budget ended with multiple "
+                "observationally unresolved hypotheses",
+                failure_class="unresolved_under_bounded_diagnostic_budget",
+            )
+        selected = survivors[0]
+        hypothesis = request_version_to_hypothesis(selected)
+        driver = self._provisional_request_driver(hypothesis)
+        tools, content, expected = probe_payload(probe, self.diag_inst)
+        offered_names = {tool.name for tool in tools}
+        clean_branch = self.session.new_branch(driver)
+        clean_branch.add_user(content, tools)
+        syndrome, generation = clean_branch.generate(
+            purpose="explore",
+            label=f"oracle-free-clean-G1@{selected.fingerprint[:8]}",
+            reason=(
+                "clean production G1 validation is separate from multiplexed "
+                "diagnostic evidence"
+            ),
+            offered_tool_names=offered_names,
+        )
+        calls, is_batch, _, errors = _observe_with_driver(generation.response, driver)
+        values = {call.name: call.arguments for call in calls}
+        clean_ok = (
+            not errors
+            and is_batch
+            and len(calls) == len(expected)
+            and set(values) == set(expected)
+            and all(values[name] == expected[name] for name in expected)
+        )
+        if not clean_ok:
+            negative = negative_behavior_evidence(
+                component=ProtocolComponent.REQUEST,
+                generation=generation,
+                observation=(
+                    "the diagnostic survivor did not produce the complete clean G1 "
+                    "witness; diagnostic success is not a production ABI witness"
+                ),
+            )
+            self.synthesis_report.evidence.record(negative)
+            return self._fail_oracle_free(
+                "the diagnostic request survivor failed clean production G1 validation"
+            )
+        if not syndrome.accepted_calls:
+            assert isinstance(hypothesis.response, tuple)
+            apply_discovered_response(
+                syndrome,
+                parser=hypothesis.response[-1],
+                calls=calls,
+                offered_tool_names=offered_names,
+            )
+            generation.syndrome = syndrome.as_dict()
+        if tuple(syndrome.accepted_calls) != tuple(calls):
+            return self._fail_oracle_free(
+                "clean G1 parser interpretations disagreed; refusing an ambiguous Driver",
+                failure_class="ambiguous_observation",
+            )
+        annotate_arguments(syndrome, tools, expected)
+
+        request_fact = component_observation_evidence(
+            component=ProtocolComponent.REQUEST,
+            generation=generation,
+            observation="the diagnostic survivor elicited the exact clean production G1 batch",
+        )
+        response_fact = component_observation_evidence(
+            component=ProtocolComponent.RESPONSE,
+            generation=generation,
+            observation=(
+                "the survivor's response program parsed exact clean G1 names, "
+                "arguments, batch structure and call IDs"
+            ),
+        )
+        self.synthesis_report.evidence.record(request_fact)
+        self.synthesis_report.evidence.record(response_fact)
+        component_ids = (request_fact.evidence_id, response_fact.evidence_id)
+        for witness in obligation_witness_evidence(
+            obligation_ids=("OB01", "OB02", "OB03", "OB04", "OB05", "OB06"),
+            phase=WitnessPhase.G1,
+            generations=(generation,),
+            component_evidence_ids=component_ids,
+            observation=(
+                "only the clean production G1 turn contains the complete call/schema "
+                "witness for these obligations"
+            ),
+        ):
+            self.synthesis_report.evidence.record_witness(witness)
+        for support in obligation_support_evidence(
+            obligation_ids=("OB07", "OB08", "OB09", "OB12", "OB17", "OB18"),
+            generations=(generation,),
+            component_evidence_ids=component_ids,
+            observation="clean G1 supports but cannot complete these multi-turn obligations",
+        ):
+            self.synthesis_report.evidence.record_support(support)
+
+        base = PartialProtocolHypothesis(schema_transforms=hypothesis.schema_transforms)
+        request_only = base.refine(ProtocolComponent.REQUEST, hypothesis.request)
+        self.synthesis_report.record_revision(
+            base,
+            request_only,
+            component=ProtocolComponent.REQUEST,
+            generation_id=generation.index,
+            evidence_ids=[request_fact.evidence_id],
+            reason="selected the sole positive-witness request partition survivor",
+        )
+        resolved = request_only.refine(ProtocolComponent.RESPONSE, hypothesis.response)
+        self.synthesis_report.record_revision(
+            request_only,
+            resolved,
+            component=ProtocolComponent.RESPONSE,
+            generation_id=generation.index,
+            evidence_ids=[response_fact.evidence_id],
+            reason="validated the paired response program on a clean production G1 turn",
+        )
+        self.synthesis_report.version_spaces.append(
+            {
+                "component": ProtocolComponent.REQUEST.value,
+                "initial_size": len(request_version_space()),
+                "survivor_fingerprints": [selected.fingerprint],
+                "survivors": [selected.as_dict()],
+                "refinement_basis": "diagnostic_positive_witness_partitions",
+            }
+        )
+        return (
+            _Trajectory(
+                clean_branch,
+                probe.config,
+                syndrome,
+                clean_branch.freeze(),
+                active_hypothesis=resolved,
+                discriminating=True,
+                oracle_free=True,
+                request_version=selected,
+            ),
+            True,
+        )
+
     def _maybe_discriminating_request_trajectory(
         self,
         probe: ProbeTemplate,
@@ -860,6 +1142,11 @@ class XptCompiler:
         *,
         succeeded: bool,
     ) -> tuple[_Trajectory | None, bool]:
+        oracle_free, claimed = self._maybe_oracle_free_request_trajectory(
+            probe, branch, succeeded=succeeded
+        )
+        if claimed:
+            return oracle_free, True
         active, claimed = self._maybe_active_request_trajectory(probe, branch, succeeded=succeeded)
         if claimed:
             return active, True
@@ -1418,6 +1705,275 @@ class XptCompiler:
             succeeded=ok,
         )
         return driver, fork, generation, ok, calls
+
+    def complete_oracle_free_trajectory(self, traj: _Trajectory) -> Driver | None:
+        """Diagnose result consumption, then run a clean production G2/G3 trace."""
+        hypothesis = traj.active_hypothesis
+        generation1 = traj.branch.last_generation
+        request_version = traj.request_version
+        if hypothesis is None or generation1 is None or request_version is None:
+            self._active_failure = "oracle-free trajectory lacks a clean G1 hypothesis"
+            self.synthesis_report.failure = self._active_failure
+            self.synthesis_report.failure_class = "no_working_program_found"
+            return None
+
+        survivors = list(result_version_space())
+        identifiability = check_identifiability(ProtocolComponent.TOOL_RESULT, survivors)
+        reports = dict(self.synthesis_report.identifiability or {})
+        reports["tool_result"] = identifiability.as_dict()
+        self.synthesis_report.identifiability = reports
+        if not identifiability.identifiable:
+            self._active_failure = (
+                "the current tool-result protocol family is observationally "
+                "unidentifiable under the available diagnostic probe family"
+            )
+            self.synthesis_report.failure = self._active_failure
+            self.synthesis_report.failure_class = "observationally_unidentifiable"
+            return None
+
+        sample_call = next(iter(traj.syndrome.accepted_calls), None)
+        if sample_call is None:
+            self._active_failure = "clean G1 produced no call for result diagnostics"
+            self.synthesis_report.failure = self._active_failure
+            self.synthesis_report.failure_class = "no_working_program_found"
+            return None
+        diagnostic_probe, plan = build_result_probe(
+            survivors,
+            request_version=request_version,
+            prefix_messages=traj.branch.model_messages,
+            tools=gauntlet_tools(),
+            call=sample_call,
+            seed=self.seed,
+            sequence=1,
+        )
+        diagnostic_branch = self.session.new_diagnostic_branch(diagnostic_probe)
+        _, diagnostic_generation = diagnostic_branch.generate(
+            purpose="explore",
+            label="oracle-free-result-probe-1",
+            reason=(
+                "counterfactual result representations carry fresh sentinels; only "
+                "an exact structured recovery call can select a predicted partition"
+            ),
+            offered_tool_names={"report"},
+        )
+        outcome = observe_probe_response(
+            diagnostic_probe,
+            diagnostic_generation.response,
+            candidate_drivers_for_probe((request_version,)),
+        )
+        if outcome.outcome_key is None:
+            plan.record_outcome(outcome)
+            self.synthesis_report.probe_plans.append(plan.as_dict())
+            self._active_failure = (
+                "the current tool-result protocol family is observationally "
+                "unidentifiable under the available observations: " + outcome.reason
+            )
+            self.synthesis_report.failure = self._active_failure
+            self.synthesis_report.failure_class = "observationally_unidentifiable"
+            return None
+
+        evidence = diagnostic_witness_evidence(
+            component=ProtocolComponent.TOOL_RESULT,
+            generation=diagnostic_generation,
+            plan=plan,
+            outcome=outcome,
+        )
+        plan.record_outcome(outcome, evidence_id=evidence.evidence_id)
+        removed = set(plan.hypotheses_removed)
+        self.synthesis_report.evidence.eliminate_by_diagnostic_partition(
+            ProtocolComponent.TOOL_RESULT,
+            removed,
+            evidence=evidence,
+        )
+        self.synthesis_report.probe_plans.append(plan.as_dict())
+        remaining = set(plan.hypotheses_remaining)
+        survivors = [
+            version for version in survivors if version.fingerprint in remaining
+        ]
+        self.session.ledger.decide(
+            phase="oracle-free-result-partition",
+            generation=diagnostic_generation.index,
+            probe=plan.probe_id,
+            observed_outcome=outcome.outcome_key,
+            witness_ids=list(outcome.witness_ids),
+            removed=sorted(removed),
+            remaining=sorted(remaining),
+            elimination_basis="exclusive_nonce_bound_structured_result_witness",
+        )
+        if len(survivors) != 1:
+            self._active_failure = (
+                "the bounded result diagnostic probe left multiple unresolved hypotheses"
+            )
+            self.synthesis_report.failure = self._active_failure
+            self.synthesis_report.failure_class = "unresolved_under_bounded_diagnostic_budget"
+            return None
+
+        selected_version = survivors[0]
+        selected = hypothesis.refine(
+            ProtocolComponent.TOOL_RESULT,
+            result_version_to_program(selected_version),
+        )
+        self.synthesis_report.record_revision(
+            hypothesis,
+            selected,
+            component=ProtocolComponent.TOOL_RESULT,
+            generation_id=diagnostic_generation.index,
+            evidence_ids=[evidence.evidence_id],
+            reason=(
+                "selected the sole result representation whose fresh sentinel "
+                "produced the predicted structured recovery witness"
+            ),
+        )
+        self.synthesis_report.version_spaces.append(
+            {
+                "component": ProtocolComponent.TOOL_RESULT.value,
+                "initial_size": len(result_version_space()),
+                "survivor_fingerprints": [selected_version.fingerprint],
+                "survivors": [selected_version.as_dict()],
+                "refinement_basis": "diagnostic_positive_witness_partitions",
+            }
+        )
+
+        driver, fork, generation2, ok, calls = self._run_active_result_candidate(
+            traj,
+            selected,
+            label=f"oracle-free-clean-G2@{selected_version.fingerprint[:8]}",
+            reason=(
+                "clean production G2 validation is separate from the multiplexed "
+                "result diagnostic"
+            ),
+        )
+        if not ok:
+            negative = negative_behavior_evidence(
+                component=ProtocolComponent.TOOL_RESULT,
+                generation=generation2,
+                observation=(
+                    "the diagnostic survivor failed the complete clean G2 recovery witness"
+                ),
+            )
+            self.synthesis_report.evidence.record(negative)
+            self._active_failure = (
+                "the diagnostic tool-result survivor failed clean production G2 validation"
+            )
+            self.synthesis_report.failure = self._active_failure
+            self.synthesis_report.failure_class = "no_working_program_found"
+            return None
+
+        result_fact = component_observation_evidence(
+            component=ProtocolComponent.TOOL_RESULT,
+            generation=generation2,
+            observation=(
+                "the selected renderer carried all fresh result/error sentinels into "
+                "the exact clean G2 recovery batch"
+            ),
+        )
+        response_fact = component_observation_evidence(
+            component=ProtocolComponent.RESPONSE,
+            generation=generation2,
+            observation="the unchanged response program parsed the exact clean G2 batch",
+        )
+        self.synthesis_report.evidence.record(result_fact)
+        self.synthesis_report.evidence.record(response_fact)
+        all_calls = tuple(traj.syndrome.accepted_calls) + tuple(calls)
+        call_ids = [call.id for call in all_calls]
+        present_ids = [call_id for call_id in call_ids if call_id is not None]
+        g2_ids = ["OB07", "OB10", "OB11", "OB13", "OB14"]
+        if call_ids and len(present_ids) in {0, len(call_ids)}:
+            g2_ids.append("OB08")
+        if len(set(present_ids)) == len(present_ids):
+            g2_ids.append("OB09")
+        for witness in obligation_witness_evidence(
+            obligation_ids=tuple(g2_ids),
+            phase=WitnessPhase.G2,
+            generations=(generation1, generation2),
+            component_evidence_ids=(result_fact.evidence_id, response_fact.evidence_id),
+            observation=(
+                "clean G1 plus clean G2 completely witnesses result association, "
+                "error recovery, cardinality and observed ID discipline"
+            ),
+        ):
+            self.synthesis_report.evidence.record_witness(witness)
+
+        for call in calls:
+            fork.add_tool_result(
+                call_id=call.id,
+                name=call.name,
+                content=self.diag_inst.recovery_results().get(
+                    call.name, {"status": "ok"}
+                ),
+            )
+        self.session.check_can_explore()
+        _, generation3 = fork.generate(
+            purpose="explore",
+            label="oracle-free-clean-G3@termination",
+            reason="validate the unchanged production program on final no-call termination",
+            offered_tool_names={tool.name for tool in gauntlet_tools()},
+        )
+        final_calls, _, final_text, final_errors = _observe_with_driver(
+            generation3.response, driver
+        )
+        g3_ok = (
+            not final_errors
+            and not final_calls
+            and final_text.strip() == self.diag_inst.ack_value
+        )
+        self.session.ledger.decide(
+            phase="oracle-free-clean-termination",
+            generation=generation3.index,
+            observation="final_ack" if g3_ok else "bad_or_ambiguous_termination",
+            parse_errors=list(final_errors),
+            succeeded=g3_ok,
+        )
+        if not g3_ok:
+            negative = negative_behavior_evidence(
+                component=ProtocolComponent.RESPONSE,
+                generation=generation3,
+                observation="clean G3 did not produce exact no-call termination",
+            )
+            self.synthesis_report.evidence.record(negative)
+            self._active_failure = "oracle-free synthesized protocol failed clean G3"
+            self.synthesis_report.failure = self._active_failure
+            self.synthesis_report.failure_class = "no_working_program_found"
+            return None
+
+        request_fact = component_observation_evidence(
+            component=ProtocolComponent.REQUEST,
+            generation=generation3,
+            observation="the unchanged request program elicited no spurious G3 call",
+        )
+        termination_fact = component_observation_evidence(
+            component=ProtocolComponent.RESPONSE,
+            generation=generation3,
+            observation="the response program parsed exact final text and no call",
+        )
+        cycle_fact = component_observation_evidence(
+            component=ProtocolComponent.TOOL_RESULT,
+            generation=generation3,
+            observation="the same result renderer completed the second result cycle",
+        )
+        for fact in (request_fact, termination_fact, cycle_fact):
+            self.synthesis_report.evidence.record(fact)
+        for witness in obligation_witness_evidence(
+            obligation_ids=("OB12", "OB15", "OB16", "OB17"),
+            phase=WitnessPhase.G3,
+            generations=(generation1, generation2, generation3),
+            component_evidence_ids=(
+                request_fact.evidence_id,
+                termination_fact.evidence_id,
+                cycle_fact.evidence_id,
+            ),
+            observation=(
+                "the complete clean three-turn diagnosis trace contains two result "
+                "cycles, unambiguous no-call termination and exact final text"
+            ),
+        ):
+            self.synthesis_report.evidence.record_witness(witness)
+        self.synthesis_report.final_hypothesis = selected
+        self.synthesis_report.failure = None
+        self.synthesis_report.failure_class = None
+        traj.branch = fork
+        traj.active_hypothesis = selected
+        return driver
 
     def complete_discriminating_trajectory(self, traj: _Trajectory) -> Driver | None:
         """Resolve the result version space through controlled G2 interventions."""
@@ -1982,21 +2538,31 @@ class XptCompiler:
             for traj in self._candidate_configs():
                 attempts += 1
                 if traj.active_hypothesis is not None:
-                    driver = (
-                        self.complete_discriminating_trajectory(traj)
-                        if traj.discriminating
-                        else self.complete_active_trajectory(traj)
-                    )
+                    if traj.oracle_free:
+                        driver = self.complete_oracle_free_trajectory(traj)
+                    elif traj.discriminating:
+                        driver = self.complete_discriminating_trajectory(traj)
+                    else:
+                        driver = self.complete_active_trajectory(traj)
                     result.equivalent_parsers = ["synthesized:v0.2-response-primitive"]
-                    synthesis_reason = (
-                        "a bounded version-space planner designed controlled request "
-                        "and result interventions, compared ordinary API/behavioral "
-                        "deltas, and validated the lowest-complexity survivor through G3"
-                        if traj.discriminating
-                        else "a bounded obligation-directed loop refined typed request, "
-                        "response, and tool-result holes from reusable black-box "
-                        "constraints, then validated the unchanged program through G3"
-                    )
+                    if traj.oracle_free:
+                        synthesis_reason = (
+                            "nonce-bound normal-wire probes minimized worst-case outcome "
+                            "partitions, then the sole survivors passed a separate clean "
+                            "G1/G2/G3 production trajectory"
+                        )
+                    elif traj.discriminating:
+                        synthesis_reason = (
+                            "a bounded version-space planner designed controlled request "
+                            "and result interventions, compared ordinary API/behavioral "
+                            "deltas, and validated the lowest-complexity survivor through G3"
+                        )
+                    else:
+                        synthesis_reason = (
+                            "a bounded obligation-directed loop refined typed request, "
+                            "response, and tool-result holes from reusable black-box "
+                            "constraints, then validated the unchanged program through G3"
+                        )
                     if driver is None:
                         self.session.ledger.note(
                             "active protocol synthesis failed closed: "
@@ -2180,6 +2746,9 @@ class XptCompiler:
                     self.synthesis_report.failure = (
                         "independent certification rejected the synthesized program: "
                         + repr(last_failed_obligations)
+                    )
+                    self.synthesis_report.failure_class = (
+                        "independent_certification_rejected"
                     )
                     self.synthesis_report.certification = {
                         "passed": False,

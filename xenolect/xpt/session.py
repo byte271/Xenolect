@@ -21,7 +21,7 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from xenolect.abi.events import ToolDef, ToolResult
 from xenolect.driver.encode import (
@@ -33,6 +33,9 @@ from xenolect.driver.encode import (
 from xenolect.driver.ir import Driver
 from xenolect.endpoints.errors import ClientError, FailureDomain
 from xenolect.xpt.syndrome import Syndrome, build_syndrome, sha
+
+if TYPE_CHECKING:
+    from xenolect.xpt.diagnostic_probe import DiagnosticProbe
 
 
 class BudgetExhausted(RuntimeError):
@@ -79,7 +82,7 @@ class Generation:
     branch_id: str
     forked_from: str | None
     prefix_hash: str
-    driver: dict[str, Any]
+    driver: dict[str, Any] | None
     request: dict[str, Any]
     request_hash: str
     response: Any
@@ -90,6 +93,7 @@ class Generation:
     completion_chars: int
     syndrome: dict[str, Any] | None = None
     selection_reason: str = ""
+    diagnostic_probe: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -110,6 +114,7 @@ class Generation:
             "completion_chars": self.completion_chars,
             "syndrome": self.syndrome,
             "selection_reason": self.selection_reason,
+            "diagnostic_probe": self.diagnostic_probe,
         }
 
 
@@ -160,12 +165,13 @@ class Branch:
     def __init__(
         self,
         session: XptSession,
-        driver: Driver,
+        driver: Driver | None,
         *,
         branch_id: str | None = None,
         messages: list[dict[str, Any]] | None = None,
         tools: list[ToolDef] | None = None,
         parent: str | None = None,
+        diagnostic_probe: DiagnosticProbe | None = None,
     ) -> None:
         Branch._counter += 1
         self.session = session
@@ -174,6 +180,7 @@ class Branch:
         self.model_messages: list[dict[str, Any]] = messages if messages is not None else []
         self.tools: list[ToolDef] = list(tools or [])
         self.parent = parent
+        self.diagnostic_probe = diagnostic_probe
         self.last_generation: Generation | None = None
 
     # ------------------------------------------------------------------
@@ -185,6 +192,8 @@ class Branch:
 
     def fork(self, driver: Driver | None = None, *, reason: str = "") -> Branch:
         """Fork at the current frozen prefix. Prefix must be byte-identical."""
+        if self.diagnostic_probe is not None or self.driver is None:
+            raise ValueError("diagnostic probe branches cannot enter production history")
         parent_hash = self.freeze()
         child = Branch(
             self.session,
@@ -211,6 +220,8 @@ class Branch:
     # ------------------------------------------------------------------
 
     def add_user(self, content: str, tools: list[ToolDef] | None = None) -> None:
+        if self.driver is None:
+            raise ValueError("diagnostic probe branches cannot be extended as Drivers")
         if tools:
             self.tools = list(tools)
         preambles = build_tool_preamble_messages(self.tools, self.driver)
@@ -247,6 +258,8 @@ class Branch:
     def add_tool_result(
         self, *, call_id: str | None, name: str | None, content: Any
     ) -> None:
+        if self.driver is None:
+            raise ValueError("diagnostic probe branches cannot render production results")
         msg = encode_tool_result_message(
             ToolResult(call_id=call_id, name=name, content=content), self.driver
         )
@@ -261,6 +274,10 @@ class Branch:
     # ------------------------------------------------------------------
 
     def build_request(self) -> dict[str, Any]:
+        if self.diagnostic_probe is not None:
+            return self.diagnostic_probe.wire()
+        if self.driver is None:
+            raise ValueError("production branch requires a Driver")
         wire_tools = None
         if should_send_native_tools(self.driver) and self.tools:
             wire_tools = tools_for_request(self.tools, self.driver)
@@ -379,6 +396,15 @@ class XptSession:
     def new_branch(self, driver: Driver) -> Branch:
         return Branch(self, driver)
 
+    def new_diagnostic_branch(self, probe: DiagnosticProbe) -> Branch:
+        wire = probe.wire()
+        return Branch(
+            self,
+            None,
+            messages=copy.deepcopy(wire["messages"]),
+            diagnostic_probe=probe,
+        )
+
     # ------------------------------------------------------------------
     # the one expensive operation
     # ------------------------------------------------------------------
@@ -404,7 +430,7 @@ class XptSession:
         err: str | None = None
         fatal: BaseException | None = None
         # Always send the cleaned wire (no internal `_…` bookkeeping keys).
-        wire_messages = _clean(branch.model_messages)
+        wire_messages = request["messages"]
         try:
             raw = self.client.chat_completions(wire_messages, tools=request["tools"])
         except ClientError as exc:
@@ -440,7 +466,7 @@ class XptSession:
             branch_id=branch.branch_id,
             forked_from=branch.parent,
             prefix_hash=pre_hash,
-            driver=branch.driver.canonical_dict(),
+            driver=branch.driver.canonical_dict() if branch.driver is not None else None,
             request=request,
             request_hash=sha(request),
             response=raw,
@@ -451,6 +477,11 @@ class XptSession:
             completion_chars=len(json.dumps(raw, default=str)) if raw is not None else 0,
             syndrome=syn.as_dict(),
             selection_reason=reason,
+            diagnostic_probe=(
+                branch.diagnostic_probe.as_dict()
+                if branch.diagnostic_probe is not None
+                else None
+            ),
         )
         self.ledger.generations.append(gen)
         branch.last_generation = gen

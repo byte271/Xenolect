@@ -378,7 +378,6 @@ def request_version_to_hypothesis(version: RequestVersion) -> PartialProtocolHyp
     assert version.schema_projection is not None
     assert version.call_frame is not None
     assert version.call_fields is not None
-    token = version.fingerprint[:8]
     fields = (
         ToolCallFields(name="function", arguments="input", call_id="call_ref")
         if version.call_fields == "semantic"
@@ -393,7 +392,10 @@ def request_version_to_hypothesis(version: RequestVersion) -> PartialProtocolHyp
         )
         frame_instruction = "Emit each tool call as an unframed JSON object."
     else:
-        frame = TextFrame(prefix=f"<call-{token}>", suffix=f"</call-{token}>")
+        # A public structural alternative, not a candidate/version identifier.
+        # Existing installed v0.2 artifacts retain whichever literal frame they
+        # already carry; newly synthesized versions use this stable ordinary wire.
+        frame = TextFrame(prefix="<invoke>", suffix="</invoke>")
         parser = FramedJsonToolCallsParser(
             frame=frame,
             fields=fields,

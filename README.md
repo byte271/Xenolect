@@ -75,6 +75,38 @@ A deterministic five-seed generated holdout varies structurally identifiable con
 
 The narrow claim is: **XPT can design discriminating black-box experiments and synthesize a certified working request + response + tool-result protocol without being given the target protocol format.** This remains bounded property synthesis, not provider recognition, arbitrary protocol synthesis, or state-machine synthesis.
 
+### v0.4.0 research milestone (unreleased)
+
+The current draft research branch adds oracle-free diagnostic protocol synthesis without changing the production Driver grammar. The package and release documentation remain at v0.3.0 until this gate is independently reviewed; Driver IR remains v0.2, and the production hypothesis spaces remain exactly 33 request versions and three tool-result versions.
+
+A `DiagnosticProbe` is a typed, internal experiment rather than a Driver. One normal Chat Completions request may contain multiple controlled catalog or result alternatives. Each predicted outcome partition carries fresh, collision-checked canaries. A request outcome is accepted only when a production response parser emits exactly one structured call with the predicted tool name, arguments, and call ID. A result outcome is accepted only when a fresh result sentinel is consumed and returned through the expected structured recovery call. Plain-text repetition, silence, generic rejection, parser disagreement, multiple witnesses, and unexpected output do not eliminate hypotheses.
+
+The endpoint receives only ordinary `messages` and `tools`. Probe IDs, candidate fingerprints, version IDs, property names, expected partitions, report metadata, and reference Drivers never enter the wire. Diagnostic probes cannot serialize as `.mdriver`, enter the registry, be extended as production history, or count as G1/G2/G3 obligation witnesses.
+
+The oracle-free planner predicts the outcome partition for every admissible probe and orders plans deterministically by:
+
+1. smallest worst-case surviving partition;
+2. greatest partition information score;
+3. generation cost, wire size, and complexity;
+4. a stable fingerprint.
+
+Those values rank experiments only. Logical refinement requires an exclusive nonce-bound structured witness. Before spending a generation, XPT checks whether the available probe family separates every remaining exact hypothesis pair. An unmatched observation fails closed instead of being assigned to the closest outcome. Reports retain every predicted partition, its members, the observed witness, all removals, and the logical reason for each removal.
+
+The bounded strategy uses at most two multi-outcome request probes and one counterfactual result probe, then runs a separate clean G1/G2/G3 diagnosis before the unchanged three-generation production-runtime certification. The default remains 12 total generations, three reserved certification generations, and a 300-second deadline. Exhaustive offline tests cover all 33 request and three result versions; generated end-to-end cases cover every request/result property value and important interactions. A same-space candidate-only ablation and an endpoint that rejects multiplexed catalogs demonstrate both the benefit and the identifiability boundary.
+
+The deterministic nine-case ablation uses fresh instances of the exact same endpoint family and the same budget:
+
+| Strategy | Certified | Diagnosis generations by case | Worst case | Median | Unresolved/ambiguous |
+| --- | ---: | --- | ---: | ---: | ---: |
+| Candidate-only | 4/9 | 3, 5, 9, 9, 9, 5, 7, 9, 9 | 9 | 9 | 5 |
+| Diagnostic probes | 9/9 | 7, 7, 7, 7, 7, 7, 7, 7, 7 | 7 | 7 | 0 |
+
+This ablation is evidence about the bounded generated family, not a general performance claim and not a correctness shortcut.
+
+The exact target claim is: **XPT can synthesize nonce-bound diagnostic probes that distinguish a bounded protocol hypothesis space and produce an independently certified working request + response + tool-result Driver without receiving target values or property-local fault localization from the endpoint.**
+
+The boundary is equally important: **If the endpoint exposes neither a discriminating positive behavior nor logically usable structural/API evidence, XPT fails closed rather than guessing.** This milestone does not claim stochastic, universal, arbitrary-protocol, or state-machine synthesis.
+
 The diagnostic tools used during `xenolect install` are temporary conformance probes. They are not the tools your app later uses. At runtime, Xenolect transforms the real tools supplied by your app according to the installed Driver.
 
 ## Requirements
