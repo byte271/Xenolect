@@ -1,8 +1,8 @@
 """XPT online runtime: diagnose an unknown endpoint, synthesize a driver, certify it.
 
 The compatibility seed path still walks the precompiled v0.1 request frontier.
-When a rejected wire exposes bounded nonce-bound structural evidence, the active
-path instead performs:
+When a rejected wire exposes bounded nonce-bound structural evidence, the first
+active path performs:
 
     1  partial request hypothesis        infer parameters locally; test only role
     2  response primitive synthesis      FREE over the successful paid G1 bytes
@@ -11,6 +11,13 @@ path instead performs:
     5  independent certification         production runtime + production evaluator
 
 The active and legacy paths share the same hard generation/deadline accounting.
+
+The stacked discriminating path does not require those examples.  A strict
+ordinary API rejection may name a rejected protocol parameter without supplying
+its accepted value. XPT then maintains an explicit primitive-property version
+space, changes the smallest implicated property, compares behavioral deltas,
+and validates the lowest-complexity working survivor. Generic negative model
+behavior never eliminates a version.
 
 The algorithm never sees a model name, a provider name, an endpoint type, a
 candidate id or a reference answer. Its only input is observable values returned
@@ -48,6 +55,18 @@ from xenolect.driver.ir import (
 from xenolect.driver.parse import parse_model_response_full
 from xenolect.driver.termination import Termination
 from xenolect.xpt.certify import certify
+from xenolect.xpt.discrimination import (
+    ControlledExperiment,
+    ProtocolRejection,
+    RequestVersion,
+    ResultVersion,
+    VersionSpace,
+    parse_protocol_rejection,
+    request_version_space,
+    request_version_to_hypothesis,
+    result_version_space,
+    result_version_to_program,
+)
 from xenolect.xpt.frontier import (
     CERTIFICATION_GENERATION_UPPER_BOUND,
     FrontierEvidence,
@@ -167,6 +186,8 @@ class _Trajectory:
     syndrome: Syndrome
     frozen_prefix: str
     active_hypothesis: PartialProtocolHypothesis | None = None
+    discriminating: bool = False
+    request_version: RequestVersion | None = None
 
 
 def _driver_from(
@@ -255,6 +276,7 @@ class XptCompiler:
         self.obligation_planner = ObligationDirectedPlanner()
         self.synthesis_report = ProtocolSynthesisReport()
         self._active_counterexample_seen = False
+        self._active_discrimination_seen = False
         self._active_failure: str | None = None
 
     # ------------------------------------------------------------------
@@ -319,12 +341,17 @@ class XptCompiler:
         """Execute a resolved request while response/result remain typed holes."""
         if not isinstance(hypothesis.request, tuple):
             raise ValueError("request experiment requires a resolved request program")
+        response = (
+            list(hypothesis.response)
+            if isinstance(hypothesis.response, tuple)
+            else [NativeToolCallsParser()]
+        )
         return Driver(
             ir_version="0.2",
             schema_transforms=list(hypothesis.schema_transforms),
             protocol=ProtocolProgram(
                 request=list(hypothesis.request),
-                response=[NativeToolCallsParser()],
+                response=response,
                 tool_result=ToolResultMessage(
                     role="tool",
                     segments=[ResultField(field="content")],
@@ -579,6 +606,265 @@ class XptCompiler:
             True,
         )
 
+    def _record_controlled_experiment(self, experiment: ControlledExperiment) -> None:
+        self.synthesis_report.experiments.append(
+            {"kind": "controlled_intervention", **experiment.as_dict()}
+        )
+        self.session.ledger.decide(
+            phase="active-discriminating-plan",
+            kind="controlled_intervention",
+            **experiment.as_dict(),
+        )
+
+    def _record_api_rejection(
+        self,
+        *,
+        space: VersionSpace,
+        tested: RequestVersion | ResultVersion,
+        rejection: ProtocolRejection,
+        generation: Generation,
+    ) -> None:
+        evidence = counterexample_evidence(
+            component=rejection.component,
+            generation=generation,
+            observation=(
+                f"ordinary API rejection named parameter {rejection.parameter!r} "
+                "without revealing an accepted value"
+            ),
+            contradiction_class=ContradictionClass.WIRE_API,
+            determinism_assumption=(
+                "the endpoint returned an explicit unsupported-value/parameter "
+                "envelope establishing property-local deterministic rejection"
+            ),
+        )
+        self.synthesis_report.evidence.eliminate(
+            rejection.component,
+            tested.fingerprint,
+            evidence=evidence,
+        )
+        removed = space.eliminate_rejected_value(
+            tested, rejection, evidence_id=evidence.evidence_id
+        )
+        self.synthesis_report.behavioral_deltas.append(
+            {
+                "generation_id": generation.index,
+                "component": rejection.component.value,
+                "candidate_fingerprint": tested.fingerprint,
+                "outcome": "deterministic_api_rejection",
+                "implicated_property": rejection.parameter,
+                "accepted_value_revealed": False,
+                "surviving_versions_removed": removed,
+                "evidence_id": evidence.evidence_id,
+            }
+        )
+
+    def _maybe_discriminating_request_trajectory(
+        self,
+        probe: ProbeTemplate,
+        branch: Branch,
+        *,
+        succeeded: bool,
+    ) -> tuple[_Trajectory | None, bool]:
+        """Actively refine a request version space from ordinary API behavior."""
+        if succeeded or self._active_discrimination_seen:
+            return None, False
+        initial_generation = branch.last_generation
+        if initial_generation is None:
+            return None, False
+        rejection = parse_protocol_rejection(initial_generation.response)
+        if rejection is None or rejection.component != ProtocolComponent.REQUEST:
+            return None, False
+
+        self._active_discrimination_seen = True
+        self.left_dag = True
+        self.synthesis_report.discriminating = True
+        space = VersionSpace(ProtocolComponent.REQUEST, request_version_space())
+        native = next(
+            version
+            for version in space.surviving_versions()
+            if isinstance(version, RequestVersion) and version.mode == "native"
+        )
+        self._record_api_rejection(
+            space=space,
+            tested=native,
+            rejection=rejection,
+            generation=initial_generation,
+        )
+        previous: RequestVersion = native
+        implicated = rejection.parameter
+        tools, content, expected = probe_payload(probe, self.diag_inst)
+        offered_names = {tool.name for tool in tools}
+
+        while space.survivors:
+            selected_raw, experiment = space.choose(
+                previous=previous,
+                implicated_parameter=implicated,
+                expected_obligation_gain=6,
+            )
+            assert isinstance(selected_raw, RequestVersion)
+            selected = selected_raw
+            self._record_controlled_experiment(experiment)
+            hypothesis = request_version_to_hypothesis(selected)
+            driver = self._provisional_request_driver(hypothesis)
+            candidate_branch = self.session.new_branch(driver)
+            candidate_branch.add_user(content, tools)
+            self.session.check_can_explore()
+            candidate_syn, generation = candidate_branch.generate(
+                purpose="explore",
+                label=f"discriminate-G1@{selected.fingerprint[:8]}",
+                reason=(
+                    "testing the lowest-complexity surviving request program; "
+                    "only controlled property deltas distinguish it from the prior wire"
+                ),
+                offered_tool_names=offered_names,
+            )
+            self._discover_paid_response(
+                candidate_syn,
+                generation,
+                offered_names=offered_names,
+                expected=expected,
+                label=f"discriminate-G1@{selected.fingerprint[:8]}",
+            )
+            annotate_arguments(candidate_syn, tools, expected)
+            calls, is_batch, _, errors = _observe_with_driver(generation.response, driver)
+            values = {call.name: call.arguments for call in calls}
+            candidate_ok = (
+                not errors
+                and is_batch
+                and len(calls) == len(expected)
+                and set(values) == set(expected)
+                and all(values[name] == expected[name] for name in expected)
+            )
+            if candidate_ok:
+                request_fact = component_observation_evidence(
+                    component=ProtocolComponent.REQUEST,
+                    generation=generation,
+                    observation=("the controlled request intervention elicited the exact G1 batch"),
+                )
+                response_fact = component_observation_evidence(
+                    component=ProtocolComponent.RESPONSE,
+                    generation=generation,
+                    observation=(
+                        "the invented response program parsed exact names, arguments, "
+                        "parallel calls, and IDs from normal assistant output"
+                    ),
+                )
+                self.synthesis_report.evidence.record(request_fact)
+                self.synthesis_report.evidence.record(response_fact)
+                g1_ids = (request_fact.evidence_id, response_fact.evidence_id)
+                witnesses = obligation_witness_evidence(
+                    obligation_ids=("OB01", "OB02", "OB03", "OB04", "OB05", "OB06"),
+                    phase=WitnessPhase.G1,
+                    generations=(generation,),
+                    component_evidence_ids=g1_ids,
+                    observation=(
+                        "the accepted intervention contains the complete G1 witness "
+                        "for the listed call/schema obligations"
+                    ),
+                )
+                for witness in witnesses:
+                    self.synthesis_report.evidence.record_witness(witness)
+                for support in obligation_support_evidence(
+                    obligation_ids=("OB07", "OB08", "OB09", "OB12", "OB17", "OB18"),
+                    generations=(generation,),
+                    component_evidence_ids=g1_ids,
+                    observation="G1 contributes to but does not complete these obligations",
+                ):
+                    self.synthesis_report.evidence.record_support(support)
+                base = PartialProtocolHypothesis(schema_transforms=hypothesis.schema_transforms)
+                request_only = base.refine(ProtocolComponent.REQUEST, hypothesis.request)
+                self.synthesis_report.record_revision(
+                    base,
+                    request_only,
+                    component=ProtocolComponent.REQUEST,
+                    generation_id=generation.index,
+                    evidence_ids=[request_fact.evidence_id],
+                    reason=(
+                        "selected the lowest-complexity request version surviving "
+                        "controlled API rejections"
+                    ),
+                )
+                resolved = request_only.refine(ProtocolComponent.RESPONSE, hypothesis.response)
+                self.synthesis_report.record_revision(
+                    request_only,
+                    resolved,
+                    component=ProtocolComponent.RESPONSE,
+                    generation_id=generation.index,
+                    evidence_ids=[response_fact.evidence_id],
+                    reason=(
+                        "used the response frame and field map invented by the accepted "
+                        "request intervention"
+                    ),
+                )
+                self.synthesis_report.behavioral_deltas.append(
+                    {
+                        "generation_id": generation.index,
+                        "component": "request",
+                        "candidate_fingerprint": selected.fingerprint,
+                        "outcome": "exact_G1_batch",
+                        "implicated_property": None,
+                        "accepted_value_revealed": False,
+                        "surviving_versions_removed": 0,
+                    }
+                )
+                self.synthesis_report.version_spaces.append(space.as_dict())
+                return (
+                    _Trajectory(
+                        candidate_branch,
+                        probe.config,
+                        candidate_syn,
+                        candidate_branch.freeze(),
+                        active_hypothesis=resolved,
+                        discriminating=True,
+                        request_version=selected,
+                    ),
+                    True,
+                )
+
+            next_rejection = parse_protocol_rejection(generation.response)
+            if next_rejection is None or next_rejection.component != ProtocolComponent.REQUEST:
+                negative = negative_behavior_evidence(
+                    component=ProtocolComponent.REQUEST,
+                    generation=generation,
+                    observation=(
+                        "request intervention did not produce G1 and returned no "
+                        "deterministic protocol rejection"
+                    ),
+                )
+                self.synthesis_report.evidence.record(negative)
+                self.synthesis_report.version_spaces.append(space.as_dict())
+                self._active_failure = (
+                    "discriminating request experiment produced only stochastic "
+                    "negative behavior; no SAFE refinement is available"
+                )
+                self.synthesis_report.failure = self._active_failure
+                return None, True
+            self._record_api_rejection(
+                space=space,
+                tested=selected,
+                rejection=next_rejection,
+                generation=generation,
+            )
+            previous = selected
+            implicated = next_rejection.parameter
+
+        self.synthesis_report.version_spaces.append(space.as_dict())
+        self._active_failure = "deterministic rejections exhausted the request version space"
+        self.synthesis_report.failure = self._active_failure
+        return None, True
+
+    def _maybe_synthesis_request_trajectory(
+        self,
+        probe: ProbeTemplate,
+        branch: Branch,
+        *,
+        succeeded: bool,
+    ) -> tuple[_Trajectory | None, bool]:
+        active, claimed = self._maybe_active_request_trajectory(probe, branch, succeeded=succeeded)
+        if claimed:
+            return active, True
+        return self._maybe_discriminating_request_trajectory(probe, branch, succeeded=succeeded)
+
     # ------------------------------------------------------------------
     # candidate configurations
     # ------------------------------------------------------------------
@@ -707,7 +993,7 @@ class XptCompiler:
                 succeeded=ok,
                 hypotheses_before=node.n_hypotheses,
             )
-            active, claimed = self._maybe_active_request_trajectory(probe, branch, succeeded=ok)
+            active, claimed = self._maybe_synthesis_request_trajectory(probe, branch, succeeded=ok)
             if claimed:
                 if active is not None:
                     yield active
@@ -742,7 +1028,9 @@ class XptCompiler:
                 self.session.ledger.decide(
                     phase="config", probe=probe.id, reason=self._reason, succeeded=ok
                 )
-                active, claimed = self._maybe_active_request_trajectory(probe, branch, succeeded=ok)
+                active, claimed = self._maybe_synthesis_request_trajectory(
+                    probe, branch, succeeded=ok
+                )
                 if claimed:
                     if active is not None:
                         yield active
@@ -801,7 +1089,7 @@ class XptCompiler:
                 reason=self._reason,
                 succeeded=ok,
             )
-            active, claimed = self._maybe_active_request_trajectory(probe, branch, succeeded=ok)
+            active, claimed = self._maybe_synthesis_request_trajectory(probe, branch, succeeded=ok)
             if claimed:
                 if active is not None:
                     yield active
@@ -1130,6 +1418,217 @@ class XptCompiler:
             succeeded=ok,
         )
         return driver, fork, generation, ok, calls
+
+    def complete_discriminating_trajectory(self, traj: _Trajectory) -> Driver | None:
+        """Resolve the result version space through controlled G2 interventions."""
+        hypothesis = traj.active_hypothesis
+        generation1 = traj.branch.last_generation
+        if hypothesis is None or generation1 is None:
+            return None
+        planned = self.obligation_planner.choose(hypothesis, self.synthesis_report.evidence)
+        if planned is None or planned.component != ProtocolComponent.TOOL_RESULT:
+            self._active_failure = "obligation planner did not select the result hole"
+            self.synthesis_report.failure = self._active_failure
+            return None
+        self.synthesis_report.record_experiment(planned)
+        space = VersionSpace(ProtocolComponent.TOOL_RESULT, result_version_space())
+        previous: ResultVersion | None = None
+        implicated: str | None = None
+
+        while space.survivors:
+            selected_raw, experiment = space.choose(
+                previous=previous,
+                implicated_parameter=implicated,
+                expected_obligation_gain=len(planned.implicated_obligations),
+            )
+            assert isinstance(selected_raw, ResultVersion)
+            selected_version = selected_raw
+            self._record_controlled_experiment(experiment)
+            selected = hypothesis.refine(
+                ProtocolComponent.TOOL_RESULT,
+                result_version_to_program(selected_version),
+            )
+            driver, fork, generation2, ok, calls = self._run_active_result_candidate(
+                traj,
+                selected,
+                label=f"discriminate-G2@{selected_version.fingerprint[:8]}",
+                reason=(
+                    "testing one lowest-complexity surviving result placement and "
+                    "association intervention"
+                ),
+            )
+            if not ok:
+                rejection = parse_protocol_rejection(generation2.response)
+                if rejection is None or rejection.component != ProtocolComponent.TOOL_RESULT:
+                    negative = negative_behavior_evidence(
+                        component=ProtocolComponent.TOOL_RESULT,
+                        generation=generation2,
+                        observation=(
+                            "result intervention did not recover G2 and returned no "
+                            "deterministic result rejection"
+                        ),
+                    )
+                    self.synthesis_report.evidence.record(negative)
+                    self.synthesis_report.version_spaces.append(space.as_dict())
+                    self._active_failure = (
+                        "discriminating result experiment produced only stochastic "
+                        "negative behavior; no SAFE refinement is available"
+                    )
+                    self.synthesis_report.failure = self._active_failure
+                    return None
+                self._record_api_rejection(
+                    space=space,
+                    tested=selected_version,
+                    rejection=rejection,
+                    generation=generation2,
+                )
+                previous = selected_version
+                implicated = rejection.parameter
+                continue
+
+            result_fact = component_observation_evidence(
+                component=ProtocolComponent.TOOL_RESULT,
+                generation=generation2,
+                observation=(
+                    "the controlled result intervention carried fresh result/error "
+                    "sentinels into the exact G2 recovery batch"
+                ),
+            )
+            response_fact = component_observation_evidence(
+                component=ProtocolComponent.RESPONSE,
+                generation=generation2,
+                observation="the unchanged invented response parser parsed exact G2 calls",
+            )
+            self.synthesis_report.evidence.record(result_fact)
+            self.synthesis_report.evidence.record(response_fact)
+            self.synthesis_report.record_revision(
+                hypothesis,
+                selected,
+                component=ProtocolComponent.TOOL_RESULT,
+                generation_id=generation2.index,
+                evidence_ids=[result_fact.evidence_id],
+                reason=(
+                    "selected the lowest-complexity result placement/association "
+                    "surviving controlled API rejections"
+                ),
+            )
+            all_calls = tuple(traj.syndrome.accepted_calls) + tuple(calls)
+            call_ids = [call.id for call in all_calls]
+            present_ids = [call_id for call_id in call_ids if call_id is not None]
+            g2_ids = ["OB07", "OB10", "OB11", "OB13", "OB14"]
+            if call_ids and len(present_ids) in {0, len(call_ids)}:
+                g2_ids.append("OB08")
+            if len(set(present_ids)) == len(present_ids):
+                g2_ids.append("OB09")
+            for witness in obligation_witness_evidence(
+                obligation_ids=tuple(g2_ids),
+                phase=WitnessPhase.G2,
+                generations=(generation1, generation2),
+                component_evidence_ids=(result_fact.evidence_id, response_fact.evidence_id),
+                observation=(
+                    "G1 plus accepted G2 fully witnesses result association, error "
+                    "recovery, call cardinality, and observed ID discipline"
+                ),
+            ):
+                self.synthesis_report.evidence.record_witness(witness)
+            self.synthesis_report.behavioral_deltas.append(
+                {
+                    "generation_id": generation2.index,
+                    "component": "tool_result",
+                    "candidate_fingerprint": selected_version.fingerprint,
+                    "outcome": "exact_G2_recovery_batch",
+                    "implicated_property": None,
+                    "accepted_value_revealed": False,
+                    "surviving_versions_removed": 0,
+                }
+            )
+
+            for call in calls:
+                fork.add_tool_result(
+                    call_id=call.id,
+                    name=call.name,
+                    content=self.diag_inst.recovery_results().get(call.name, {"status": "ok"}),
+                )
+            self.session.check_can_explore()
+            _, generation3 = fork.generate(
+                purpose="explore",
+                label="discriminate-G3@termination",
+                reason=(
+                    "validating the unchanged surviving request/response/result "
+                    "program on final no-call termination"
+                ),
+                offered_tool_names={tool.name for tool in gauntlet_tools()},
+            )
+            final_calls, _, final_text, final_errors = _observe_with_driver(
+                generation3.response, driver
+            )
+            g3_ok = (
+                not final_errors
+                and not final_calls
+                and final_text.strip() == self.diag_inst.ack_value
+            )
+            self.session.ledger.decide(
+                phase="active-discriminating-termination",
+                generation=generation3.index,
+                observation="final_ack" if g3_ok else "bad_or_ambiguous_termination",
+                parse_errors=list(final_errors),
+                succeeded=g3_ok,
+            )
+            if not g3_ok:
+                negative = negative_behavior_evidence(
+                    component=ProtocolComponent.RESPONSE,
+                    generation=generation3,
+                    observation="the final turn did not produce exact no-call termination",
+                )
+                self.synthesis_report.evidence.record(negative)
+                self._active_failure = "synthesized discriminating protocol failed G3 termination"
+                self.synthesis_report.failure = self._active_failure
+                self.synthesis_report.version_spaces.append(space.as_dict())
+                return None
+
+            request_fact = component_observation_evidence(
+                component=ProtocolComponent.REQUEST,
+                generation=generation3,
+                observation="the unchanged request program elicited no spurious G3 call",
+            )
+            termination_fact = component_observation_evidence(
+                component=ProtocolComponent.RESPONSE,
+                generation=generation3,
+                observation="the response parser emitted exact final text and no call",
+            )
+            cycle_fact = component_observation_evidence(
+                component=ProtocolComponent.TOOL_RESULT,
+                generation=generation3,
+                observation="the selected renderer completed the second result cycle",
+            )
+            for fact in (request_fact, termination_fact, cycle_fact):
+                self.synthesis_report.evidence.record(fact)
+            for witness in obligation_witness_evidence(
+                obligation_ids=("OB12", "OB15", "OB16", "OB17"),
+                phase=WitnessPhase.G3,
+                generations=(generation1, generation2, generation3),
+                component_evidence_ids=(
+                    request_fact.evidence_id,
+                    termination_fact.evidence_id,
+                    cycle_fact.evidence_id,
+                ),
+                observation=(
+                    "the complete diagnosis trajectory contains two result cycles, "
+                    "unambiguous no-call termination, and exact final text"
+                ),
+            ):
+                self.synthesis_report.evidence.record_witness(witness)
+            self.synthesis_report.version_spaces.append(space.as_dict())
+            self.synthesis_report.final_hypothesis = selected
+            self.synthesis_report.failure = None
+            traj.branch = fork
+            traj.active_hypothesis = selected
+            return driver
+
+        self.synthesis_report.version_spaces.append(space.as_dict())
+        self._active_failure = "deterministic rejections exhausted result version space"
+        self.synthesis_report.failure = self._active_failure
+        return None
 
     def complete_active_trajectory(self, traj: _Trajectory) -> Driver | None:
         """Resolve only the result hole, then validate G2/G3 unchanged.
@@ -1483,10 +1982,18 @@ class XptCompiler:
             for traj in self._candidate_configs():
                 attempts += 1
                 if traj.active_hypothesis is not None:
-                    driver = self.complete_active_trajectory(traj)
+                    driver = (
+                        self.complete_discriminating_trajectory(traj)
+                        if traj.discriminating
+                        else self.complete_active_trajectory(traj)
+                    )
                     result.equivalent_parsers = ["synthesized:v0.2-response-primitive"]
                     synthesis_reason = (
-                        "a bounded obligation-directed loop refined typed request, "
+                        "a bounded version-space planner designed controlled request "
+                        "and result interventions, compared ordinary API/behavioral "
+                        "deltas, and validated the lowest-complexity survivor through G3"
+                        if traj.discriminating
+                        else "a bounded obligation-directed loop refined typed request, "
                         "response, and tool-result holes from reusable black-box "
                         "constraints, then validated the unchanged program through G3"
                     )

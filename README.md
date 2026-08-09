@@ -1,14 +1,14 @@
-# Xenolect v0.2.0
+# Xenolect v0.3.0
 
 Xenolect is a local compatibility layer for model servers that expose an OpenAI-style Chat Completions API.
 
 It probes a selected model through black-box interactions, compiles a verified **Driver** from the composable v0.2 protocol language, stores that Driver locally, and runs one loopback endpoint that existing OpenAI-style apps can use.
 
-> **v0.2.0 is an alpha release.** It is intentionally small and focused on Chat Completions + function tool calling. It is not a full implementation of every OpenAI API, and it does not synthesize arbitrary protocol programs yet.
+> **v0.3.0 is an alpha release.** It is intentionally small and focused on Chat Completions + function tool calling. It is not a full implementation of every OpenAI API, and it does not synthesize arbitrary protocol programs.
 
 ## Supported platforms
 
-Xenolect v0.2.0 supports:
+Xenolect v0.3.0 supports:
 
 - Windows 10/11
 - macOS
@@ -29,7 +29,7 @@ Failure to register login startup does **not** invalidate a successfully prepare
 
 This distinction matters.
 
-Xenolect v0.2.0 does not invent application tools such as search, weather, filesystem access, or shell commands. Your app supplies its normal function tools.
+Xenolect v0.3.0 does not invent application tools such as search, weather, filesystem access, or shell commands. Your app supplies its normal function tools.
 
 Xenolect compiles the **protocol Driver used to carry those tools through the selected model**. On every request it can transform the app's actual tool schemas, change how tools are presented to the model, parse model-emitted calls, translate tool-result history, and normalize the response back to OpenAI-style `tool_calls`.
 
@@ -42,15 +42,15 @@ The legacy v0.1.0 seed grammar is deliberately finite:
 
 That is **144 representable Driver programs** in v0.1.0.
 
-The v0.1.0 compiler used black-box probing and a stateful certification trajectory to infer and verify one of those programs. v0.2.0 preserves those proven configurations as a compatibility seed frontier, but the current compiler can also refine typed partial protocol hypotheses from component-level black-box evidence. If observed behavior cannot be represented or certified, setup fails rather than pretending compatibility.
+The v0.1.0 compiler used black-box probing and a stateful certification trajectory to infer and verify one of those programs. v0.3.0 preserves those proven configurations as a compatibility seed frontier, but the current compiler can also refine typed partial protocol hypotheses from component-level black-box evidence. If observed behavior cannot be represented or certified, setup fails rather than pretending compatibility.
 
-Driver IR v0.2 is the current release format. It adds a composable foundation without widening the expensive online search budget. XPT still begins with the proven request configurations from the legacy 144-program frontier, then composes the observed request presentation, response parser, tool-result renderer, schema transforms, and required batch-state actions into a parameterized protocol program. The runtime executes those primitives rather than branching directly on three format names.
+Driver IR v0.2 remains the current Driver format in Xenolect v0.3.0. It provides a composable foundation without widening the expensive online search budget. XPT can begin with the proven request configurations from the legacy 144-program frontier, then compose the observed request presentation, response parser, tool-result renderer, schema transforms, and required batch-state actions into a parameterized protocol program. The runtime executes those primitives rather than branching directly on three format names.
 
 The parameterized primitives can represent native calls, strict whole-content JSON calls, custom tagged or XML-style JSON frames, custom object field names, multiple agreeing response parsers, segmented tool-result messages, and assistant text carried beside tool calls. Existing v0.1 `.mdriver` files retain their previous JSON shape and content hash.
 
 XPT can make a bounded response-synthesis step beyond that fixed grammar: when the legacy response parsers produce no calls, it deterministically inspects the already-paid response for strict whole-content or embedded JSON tool objects, infers custom field names and adjacent literal delimiters, and validates the resulting response primitive across the remaining trajectory. Extraction is bounded; ambiguous field mappings, call IDs, or parser results fail closed.
 
-The current development milestone adds the smallest active request/result synthesis foundation:
+Xenolect v0.3.0 adds the smallest active request/result synthesis foundation:
 
 - a partial hypothesis contains executable v0.2 primitives plus typed request, response, or tool-result holes;
 - each paid observation is decomposed into nonce-bound component facts, obligation support, complete turn-scoped obligation witnesses, and independent certification evidence. Component success never inherits every obligation merely attributed to that component;
@@ -61,11 +61,19 @@ The current development milestone adds the smallest active request/result synthe
 - a result-consumption counterexample changes only the result component. Proven request/response component fingerprints remain live;
 - the completed Driver must pass G1/G2/G3 and then the independent production-runtime certification on a fresh instance.
 
-The active path is deliberately narrow. A request-side rejection must expose one structurally unambiguous JSON catalog example and a framed call example containing the active challenge nonce. A result-side rejection must expose one exact rendering example containing a fresh post-prompt sentinel. A strict `xpt_counterexample` object carrying nonce-bound atomic equality constraints is also accepted as an alternative. Missing, conflicting, replayed, oversized, or ambiguous evidence fails closed. XPT does not infer arbitrary natural-language protocol descriptions, unbounded templates, arbitrary schema transformations, or state machines.
+The structural-evidence active path is deliberately narrow. A request-side rejection must expose one structurally unambiguous JSON catalog example and a framed call example containing the active challenge nonce. A result-side rejection must expose one exact rendering example containing a fresh post-prompt sentinel. A strict `xpt_counterexample` object carrying nonce-bound atomic equality constraints is also accepted as an alternative. Missing, conflicting, replayed, oversized, or ambiguous evidence fails closed. XPT does not infer arbitrary natural-language protocol descriptions, unbounded templates, arbitrary schema transformations, or state machines.
 
 The falsifiable milestone claim is: **XPT can actively synthesize and independently certify a previously unseen request + response + tool-result protocol program from black-box observations within the existing bounded compilation budget.** It is not a claim of universal or arbitrary protocol synthesis. Every compile remains inside the same 12-generation and 300-second defaults with three generations reserved for certification.
 
 The compile report separates component facts, supporting obligation evidence, complete diagnosis witnesses, deterministic eliminations, and the independent certification certificate. G1 evidence cannot prove history preservation, error recovery, no-call termination, final text, or legal completion of the full ABI trace. The report also retains each obligation-directed experiment and component fingerprint revision.
+
+Xenolect v0.3.0 also adds active discriminating synthesis without removing the structural-evidence path. XPT maintains explicit request and result version spaces built from v0.2 primitive properties. It begins with native tools, then can actively vary textual catalog placement, catalog nesting depth, schema projection, response framing, call-field mapping, result placement, and call association. Each paid request is a controlled intervention; after the first textual proposal, refinements change only the property implicated by the prior deterministic API rejection whenever the IR permits it.
+
+The endpoint does not provide a Driver, template, delimiter, field name, dialect identity, structural example, or `xpt_counterexample`. A strict ordinary API error may identify a rejected parameter and establish that the tested value is unsupported, but it never returns the accepted value. XPT compares those behavioral deltas, retains all unrelated component evidence, and chooses the lowest-complexity working survivor. Generic invalid-value errors and ordinary negative model behavior cannot permanently remove versions. Information gain, obligation gain, complexity, and cost rank experiments only.
+
+A deterministic five-seed generated holdout varies structurally identifiable constraints while avoiding secret random literals that observations could not reveal. Every seed produces an unseen textual request program, embedded or framed response parser, and structured result renderer, then passes the existing independent production-runtime certification in 6–9 diagnosis generations plus the reserved three certification generations.
+
+The narrow claim is: **XPT can design discriminating black-box experiments and synthesize a certified working request + response + tool-result protocol without being given the target protocol format.** This remains bounded property synthesis, not provider recognition, arbitrary protocol synthesis, or state-machine synthesis.
 
 The diagnostic tools used during `xenolect install` are temporary conformance probes. They are not the tools your app later uses. At runtime, Xenolect transforms the real tools supplied by your app according to the installed Driver.
 
@@ -81,7 +89,7 @@ Common local servers are scanned automatically. If none is found, Xenolect asks 
 ### Windows
 
 ```powershell
-py -m pip install .\xenolect-0.2.0-py3-none-any.whl
+py -m pip install .\xenolect-0.3.0-py3-none-any.whl
 xenolect install
 ```
 
@@ -94,7 +102,7 @@ py -m xenolect install
 ### macOS
 
 ```bash
-python3 -m pip install ./xenolect-0.2.0-py3-none-any.whl
+python3 -m pip install ./xenolect-0.3.0-py3-none-any.whl
 xenolect install
 ```
 
@@ -107,7 +115,7 @@ python3 -m xenolect install
 ### Linux
 
 ```bash
-python3 -m pip install ./xenolect-0.2.0-py3-none-any.whl
+python3 -m pip install ./xenolect-0.3.0-py3-none-any.whl
 xenolect install
 ```
 
@@ -183,7 +191,7 @@ Model    qwen3-4b-ctx4k:latest
 API key  Any non-empty value (only if your app requires one)
 ```
 
-The API-key field above is only a placeholder for clients that refuse an empty value. **Xenolect v0.2.0 does not use that value as local authentication.**
+The API-key field above is only a placeholder for clients that refuse an empty value. **Xenolect v0.3.0 does not use that value as local authentication.**
 
 ## Commands
 
@@ -229,7 +237,7 @@ This stops the local service and attempts to disable the current platform's per-
 xenolect version
 ```
 
-## API surface in v0.2.0
+## API surface in v0.3.0
 
 Xenolect exposes a local loopback service and supports:
 
@@ -242,12 +250,12 @@ Xenolect exposes a local loopback service and supports:
 - `stream=true` as **buffered SSE compatibility streaming**
 - `stream_options.include_usage` when upstream usage data is available
 
-Buffered streaming means Xenolect first receives the complete upstream completion, then emits valid SSE chunks. **v0.2.0 does not provide token-by-token upstream streaming latency.**
+Buffered streaming means Xenolect first receives the complete upstream completion, then emits valid SSE chunks. **v0.3.0 does not provide token-by-token upstream streaming latency.**
 
-The following are **not** claimed by v0.2.0 or the current development milestone:
+The following are **not** claimed by v0.3.0:
 
 - universal or arbitrary protocol synthesis
-- request/result synthesis without unambiguous bounded structural evidence
+- recovery of arbitrary secret protocol literals, or synthesis without identifiable deterministic constraints
 - arbitrary schema-transform or state-machine synthesis
 - creation of application tools or tool implementations
 - `/v1/responses`
@@ -262,11 +270,11 @@ Fields outside the verified tool-calling path may be forwarded to the upstream s
 
 ## Local security model
 
-The background service binds to a loopback address only. It is not intended to be exposed on a LAN or the public internet. Any process running as your local user can still connect to a loopback service; v0.2.0 does not provide local client authentication.
+The background service binds to a loopback address only. It is not intended to be exposed on a LAN or the public internet. Any process running as your local user can still connect to a loopback service; v0.3.0 does not provide local client authentication.
 
 Browser cross-origin access is restricted to loopback origins. Chat requests require JSON content type. Xenolect does not store upstream API keys in its Driver registry.
 
-Credentialed remote upstreams are not a first-class persistent setup in v0.2.0; the release is primarily intended for local model servers.
+Credentialed remote upstreams are not a first-class persistent setup in v0.3.0; the release is primarily intended for local model servers.
 
 ## Local data
 

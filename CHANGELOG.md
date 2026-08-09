@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-09
+
+### Active discriminating protocol synthesis
+
+- Added explicit bounded version spaces for request and tool-result primitive properties, with controlled interventions and deterministic survivor accounting.
+- Added property-local ordinary API rejection handling. Errors identify only the rejected parameter/value already present on the wire; they never disclose an accepted value or target Driver. Generic invalid-value errors and ordinary non-call behavior cannot shrink the version space.
+- Added deterministic information-gain and obligation-gain experiment ranking. Ranking is recorded as non-proof, and each refinement preserves unrelated component evidence.
+- Added synthesis of invented textual request programs, embedded or framed response programs, and structured result renderers across message placement, catalog depth, schema projection, field mapping, result placement, and result association choices.
+- Added a non-cooperative generated five-seed holdout sweep. The endpoint returns only normal tool behavior or ordinary API errors, and all seeds synthesize distinct unseen programs and independently certify in 6–9 diagnosis generations plus the reserved three certification generations.
+
+This stacked research milestone proves one narrow claim: XPT can design discriminating black-box experiments and synthesize a certified working request + response + tool-result protocol without being given the target protocol format. It does not claim arbitrary protocol or state-machine synthesis.
+
 ### Obligation-directed active protocol synthesis
 
 - Added typed partial protocol hypotheses with unresolved request, response, and tool-result holes; unresolved hypotheses cannot become Driver artifacts.
@@ -14,6 +26,12 @@
 - Preserved v0.1 JSON/hash identity, v0.2 compatibility, the 12-generation budget, three-generation certification reserve, and 300-second deadline.
 
 This milestone proves one narrow claim: XPT can synthesize and independently certify one previously unseen request + response + tool-result program from black-box observations. It does not claim universal protocol or state-machine synthesis.
+
+### Compatibility and verification
+
+- Preserved v0.1 Driver JSON serialization and content-hash identity and retained v0.2 Driver compatibility.
+- Kept the 300-second wall-clock limit, 12-generation budget, and three-generation independent-certification reserve.
+- Verified 122 tests and all six Windows, macOS, and Linux jobs on Python 3.11 and 3.13 before release.
 
 ## 0.2.0 - 2026-08-08
 

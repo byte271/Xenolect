@@ -479,6 +479,9 @@ class ProtocolSynthesisReport:
     evidence: EvidenceStore = field(default_factory=EvidenceStore)
     revisions: list[dict[str, Any]] = field(default_factory=list)
     experiments: list[dict[str, Any]] = field(default_factory=list)
+    version_spaces: list[dict[str, Any]] = field(default_factory=list)
+    behavioral_deltas: list[dict[str, Any]] = field(default_factory=list)
+    discriminating: bool = False
     final_hypothesis: PartialProtocolHypothesis | None = None
     failure: str | None = None
     certification: dict[str, Any] | None = None
@@ -520,14 +523,23 @@ class ProtocolSynthesisReport:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "mode": "bounded_obligation_directed_cegis",
+            "mode": (
+                "bounded_active_discriminating_synthesis"
+                if self.discriminating
+                else "bounded_obligation_directed_cegis"
+            ),
             "claim": (
-                "actively synthesize and independently certify a previously unseen "
+                "design discriminating black-box experiments and synthesize a certified "
+                "working request + response + tool-result protocol without a target format"
+                if self.discriminating
+                else "actively synthesize and independently certify a previously unseen "
                 "request + response + tool-result protocol from black-box observations"
             ),
             "arbitrary_protocol_synthesis": False,
             "state_synthesis": False,
             "experiments": list(self.experiments),
+            "version_spaces": list(self.version_spaces),
+            "behavioral_deltas": list(self.behavioral_deltas),
             "evidence": self.evidence.as_dict(),
             "revisions": list(self.revisions),
             "final_hypothesis": (
