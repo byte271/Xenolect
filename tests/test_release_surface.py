@@ -42,9 +42,13 @@ def test_release_workflow_is_version_bound_and_guarded() -> None:
     assert '--target "$VERIFIED_SHA"' in workflow
     assert "python -m build" in workflow
     assert "Smoke-test wheel" in workflow
-    assert "Delete merged agent branches" in workflow
-    assert 'agent/*) ;;' in workflow
+    assert "Delete fully merged agent branches" in workflow
+    assert 'startswith("agent/")' in workflow
+    assert '--state open' in workflow
     assert '--state merged' in workflow
+    assert '--json headRefOid' in workflow
+    assert 'select(.headRefOid == \"$branch_sha\")' in workflow
+    assert 'if [ "$merged_head" != "$branch_sha" ]' in workflow
     assert 'git/refs/heads/${branch}' in workflow
 
 
