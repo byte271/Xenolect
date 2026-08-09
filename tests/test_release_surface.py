@@ -42,6 +42,10 @@ def test_release_workflow_is_version_bound_and_guarded() -> None:
     assert '--target "$VERIFIED_SHA"' in workflow
     assert "python -m build" in workflow
     assert "Smoke-test wheel" in workflow
+    assert "Delete merged agent branches" in workflow
+    assert 'agent/*) ;;' in workflow
+    assert '--state merged' in workflow
+    assert 'git/refs/heads/${branch}' in workflow
 
 
 def test_normal_cli_surface_does_not_expose_internal_commands() -> None:
