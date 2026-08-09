@@ -16,15 +16,15 @@ def _plain(text: str) -> str:
 
 
 def test_release_version_is_consistent() -> None:
-    assert __version__ == "0.3.0"
+    assert __version__ == "0.4.0"
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.3.0"' in pyproject
+    assert 'version = "0.4.0"' in pyproject
     readme = Path("README.md").read_text(encoding="utf-8")
-    assert readme.startswith("# Xenolect v0.3.0\n")
-    assert "xenolect-0.3.0-py3-none-any.whl" in readme
-    assert "releases/tag/v0.3.0" in readme
+    assert readme.startswith("# Xenolect v0.4.0\n")
+    assert "xenolect-0.4.0-py3-none-any.whl" in readme
+    assert "releases/tag/v0.4.0" in readme
     changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-    assert "## 0.3.0 - 2026-08-09" in changelog
+    assert "## 0.4.0 - 2026-08-09" in changelog
 
 
 def test_release_workflow_is_version_bound_and_guarded() -> None:
