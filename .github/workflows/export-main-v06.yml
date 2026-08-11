@@ -1,0 +1,28 @@
+name: Export main for v0.6 audit
+
+on:
+  push:
+    branches:
+      - agent/v0.6-upload-bootstrap
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Package exact main snapshot
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "7e53c1679d29dc6330afe6b8a2ad566115faa82b"
+          git archive --format=tar.gz --output=main-7e53c167.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: main-7e53c167
+          path: main-7e53c167.tar.gz
+          if-no-files-found: error
+          retention-days: 1
